@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../master"
+		},
+		{
+			"name": "master-arduino",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
