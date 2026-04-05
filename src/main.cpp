@@ -1,3 +1,7 @@
+// master_node_new_protocol.cpp
+// Protocol codes: 200-206
+// Subscribes to: be_project/master/in  (for 201, 205 from backend)
+
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
@@ -5,26 +9,38 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
-// ================= WiFi =================
-const char *WIFI_SSID = "Airtel_sahi_2825";
+// ====== WiFi Credentials ======
+const char *WIFI_SSID     = "Airtel_sahi_2825";
 const char *WIFI_PASSWORD = "Air@68881";
 
-// ================= MQTT =================
-const char *MQTT_BROKER_HOST = "1e578bacd37e4198a99e7a4a28756c6e.s1.eu.hivemq.cloud";
-const uint16_t MQTT_PORT = 8883;
-const char *MQTT_CLIENT_ID = "esp32-client-1";
-const char *MQTT_USER = "kanbs";
-const char *MQTT_PASS = "Kartik@3165";
+// ====== MQTT / HiveMQ ======
+const char    *MQTT_BROKER_HOST = "1e578bacd37e4198a99e7a4a28756c6e.s1.eu.hivemq.cloud";
+const uint16_t MQTT_PORT        = 8883;
+const char    *MQTT_CLIENT_ID   = "esp32-master-2026";
+const char    *MQTT_USER        = "kanbs";
+const char    *MQTT_PASS        = "Kartik@3165";
 
-// ================= GPIO =================
 const int LED_PIN = 2;
 
-// ================= Request Codes =================
-#define REQ_SENSOR_DATA 200
-#define REQ_NODE_ID 201
-#define RES_NODE_ID 202
+// ====== Protocol Request Codes ======
+#define REQ_NODE_ID       200
+#define RES_NODE_ASSIGN   201
+#define RES_NODE_CONFIRM  202
+#define REQ_SENSOR_DATA   203
+#define REQ_TASK_COMPLETE 204
+#define RES_ERASE_FLASH   205
+#define RES_ERASE_CONFIRM 206
 
-// ================= Root CA =================
+// ====== MQTT Topics ======
+#define TOPIC_MASTER_IN          "be_project/master/in"
+#define TOPIC_NODE_REGISTER      "be_project/node/register"
+#define TOPIC_NODE_CONFIRM_ID    "be_project/node/confirm_id"
+#define TOPIC_NODE_DATA          "be_project/node/data"
+#define TOPIC_NODE_TASK_COMPLETE "be_project/node/task_complete"
+#define TOPIC_NODE_ERASE_CONFIRM "be_project/node/erase_confirm"
+#define TOPIC_DISCONNECT         "be_project/disconnect"
+
+// ========== ROOT CA CERTIFICATE ==========
 static const char ISRG_ROOT_X1[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -46,110 +62,317 @@ qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
 rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
 HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbTANBgkq
 hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
-...
+ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
+3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
+NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
+ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
+TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
+jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
+oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
+4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
+mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
+emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )EOF";
 
-// ================= Objects =================
 WiFiClientSecure espClientSecure;
-PubSubClient mqttClient(espClientSecure);
+PubSubClient    mqttClient(espClientSecure);
 
-typedef struct
-{
+// ====== Shared packet structure (must match node) ======
+typedef struct sensor_data {
   uint16_t request_code;
-  char node_id[37];
-  char node_mac[18];
-  float reading;
-  float battery_percent;
+  char     node_id[37];
+  char     node_mac[18];
+  float    reading;
+  float    battery_percent;
   uint32_t timestamp;
-  char date_str[11];
-  char time_str[9];
+  char     date_str[11];
+  char     time_str[9];
+  uint8_t  via;
+  char     repeater_mac[18];
+  char     master_mac[18];
 } sensor_data_t;
 
+// ====== FreeRTOS queue for sensor readings ======
 #define QUEUE_SIZE 10
 QueueHandle_t mqttQueue;
 
-// ================= LED =================
-void ledBlink(unsigned long intervalMs)
-{
-  static unsigned long last = 0;
-  static bool state = false;
+// ====== Peer tracking ======
+#define MAX_NODES 10
+uint8_t registeredNodes[MAX_NODES][6];
+int     nodeCount = 0;
 
-  if (millis() - last >= intervalMs)
-  {
-    last = millis();
+// ===============================================================
+// LED helpers
+// ===============================================================
+void ledBlink(unsigned long intervalMs) {
+  static unsigned long lastToggle = 0;
+  static bool state = false;
+  unsigned long now = millis();
+  if (now - lastToggle >= intervalMs) {
+    lastToggle = now;
     state = !state;
-    digitalWrite(LED_PIN, state);
+    digitalWrite(LED_PIN, state ? HIGH : LOW);
+  }
+}
+void ledOn()  { digitalWrite(LED_PIN, HIGH); }
+void ledOff() { digitalWrite(LED_PIN, LOW);  }
+
+// ===============================================================
+// ESP-NOW: add peer if not already tracked
+// ===============================================================
+bool addPeerIfNeeded(const uint8_t *mac) {
+  for (int i = 0; i < nodeCount; i++) {
+    if (memcmp(registeredNodes[i], mac, 6) == 0) return true;
+  }
+  if (esp_now_is_peer_exist(mac)) return true;
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, mac, 6);
+  peerInfo.channel = 5;
+  peerInfo.encrypt = false;
+
+  esp_err_t result = esp_now_add_peer(&peerInfo);
+  if (result == ESP_OK) {
+    if (nodeCount < MAX_NODES) {
+      memcpy(registeredNodes[nodeCount++], mac, 6);
+    }
+    Serial.printf("✅ Added ESP-NOW peer: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return true;
+  }
+  Serial.printf("❌ Failed to add peer: %d\n", result);
+  return false;
+}
+
+// ===============================================================
+// Helper: parse "AA:BB:CC:DD:EE:FF" → byte array
+// ===============================================================
+bool parseMacString(const char *macStr, uint8_t *out) {
+  return sscanf(macStr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                &out[0], &out[1], &out[2], &out[3], &out[4], &out[5]) == 6;
+}
+
+// ===============================================================
+// Helper: send ESP-NOW packet with up to 3 retries
+// ===============================================================
+void espnowSendWithRetry(const uint8_t *mac, const sensor_data_t &pkt) {
+  for (int i = 0; i < 3; i++) {
+    esp_err_t r = esp_now_send(mac, (const uint8_t *)&pkt, sizeof(pkt));
+    if (r == ESP_OK) {
+      Serial.printf("✅ ESP-NOW sent (attempt %d)\n", i + 1);
+      return;
+    }
+    Serial.printf("⚠️ ESP-NOW send failed (attempt %d): %d\n", i + 1, r);
+    delay(100);
   }
 }
 
-void ledOn() { digitalWrite(LED_PIN, HIGH); }
-void ledOff() { digitalWrite(LED_PIN, LOW); }
+// ===============================================================
+// MQTT callback — receives 201 and 205 from backend
+// ===============================================================
+void mqttCallback(char *topic, byte *payload, unsigned int length) {
+  StaticJsonDocument<256> doc;
+  if (deserializeJson(doc, payload, length)) {
+    Serial.println("❌ JSON parse error in MQTT callback");
+    return;
+  }
 
-// ================= WiFi =================
-void connectWiFi()
-{
+  uint16_t   reqCode = doc["request_code"];
+  const char *macStr = doc["mac"];
+
+  Serial.printf("📩 MQTT msg topic=%s req=%d mac=%s\n",
+                topic, reqCode, macStr ? macStr : "null");
+
+  // ---- 201: Node ID assigned → forward to node ----
+  if (reqCode == RES_NODE_ASSIGN) {
+    if (!macStr) { Serial.println("❌ No MAC in 201"); return; }
+
+    uint8_t nodeMac[6];
+    if (!parseMacString(macStr, nodeMac)) {
+      Serial.printf("❌ Invalid MAC in 201: %s\n", macStr);
+      return;
+    }
+    if (!addPeerIfNeeded(nodeMac)) return;
+
+    sensor_data_t reply = {};
+    reply.request_code = RES_NODE_ASSIGN;
+    const char *nid = doc["node_id"] | "";
+    strncpy(reply.node_id,  nid, sizeof(reply.node_id) - 1);
+    strncpy(reply.node_mac, "MASTER", sizeof(reply.node_mac) - 1);
+
+    Serial.printf("📡 Forwarding 201 → %02X:%02X:%02X:%02X:%02X:%02X  id=%s\n",
+                  nodeMac[0], nodeMac[1], nodeMac[2], nodeMac[3], nodeMac[4], nodeMac[5], nid);
+    espnowSendWithRetry(nodeMac, reply);
+  }
+
+  // ---- 205: Erase flash → forward to node ----
+  else if (reqCode == RES_ERASE_FLASH) {
+    if (!macStr) { Serial.println("❌ No MAC in 205"); return; }
+
+    uint8_t nodeMac[6];
+    if (!parseMacString(macStr, nodeMac)) {
+      Serial.printf("❌ Invalid MAC in 205: %s\n", macStr);
+      return;
+    }
+    if (!addPeerIfNeeded(nodeMac)) return;
+
+    sensor_data_t reply = {};
+    reply.request_code = RES_ERASE_FLASH;
+    strncpy(reply.node_mac, "MASTER", sizeof(reply.node_mac) - 1);
+
+    Serial.printf("📡 Forwarding 205 → %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  nodeMac[0], nodeMac[1], nodeMac[2], nodeMac[3], nodeMac[4], nodeMac[5]);
+    espnowSendWithRetry(nodeMac, reply);
+  }
+}
+
+// ===============================================================
+// WiFi connect
+// ===============================================================
+void connectWiFi() {
+  Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+  WiFi.disconnect(true);
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.config(IPAddress(192, 168, 1, 55), IPAddress(192, 168, 1, 1),
+              IPAddress(255, 255, 255, 0), IPAddress(1, 1, 1, 1),
+              IPAddress(8, 8, 8, 8));
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  while (WiFi.status() != WL_CONNECTED)
-  {
+  int retry = 0;
+  while (WiFi.status() != WL_CONNECTED) {
     ledBlink(300);
     delay(500);
+    Serial.print(".");
+    if (++retry > 40) {
+      Serial.println("\n❌ WiFi connect failed, restarting...");
+      ESP.restart();
+    }
   }
+  Serial.printf("\n✅ WiFi Connected  IP: %s\n", WiFi.localIP().toString().c_str());
 
-  Serial.println("WiFi Connected");
+  uint8_t ch; wifi_second_chan_t sch;
+  esp_wifi_get_channel(&ch, &sch);
+  Serial.printf("📡 WiFi channel: %d\n", ch);
 }
 
-// ================= MQTT Callback =================
-void mqttCallback(char *topic, byte *payload, unsigned int length)
-{
-  StaticJsonDocument<256> doc;
-  deserializeJson(doc, payload, length);
-
-  if (doc["request_code"] == RES_NODE_ID)
-  {
-    Serial.println("Node ID received");
-  }
-}
-
-// ================= MQTT =================
-void connectMQTT()
-{
+// ===============================================================
+// MQTT connect
+// ===============================================================
+void connectMQTT() {
   espClientSecure.setCACert(ISRG_ROOT_X1);
+  mqttClient.setBufferSize(1024);
   mqttClient.setServer(MQTT_BROKER_HOST, MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
 
-  while (!mqttClient.connected())
-  {
-    if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS))
-    {
-      mqttClient.subscribe("be_project/test/in");
-      ledOn();
-    }
-    else
-    {
-      delay(2000);
-    }
+  Serial.println("🔐 Connecting to HiveMQ...");
+  if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS)) {
+    Serial.println("✅ MQTT connected");
+    ledOn();
+    // Subscribe to the SINGLE topic for backend→master commands
+    mqttClient.subscribe(TOPIC_MASTER_IN);
+    Serial.printf("📬 Subscribed to %s\n", TOPIC_MASTER_IN);
+  } else {
+    Serial.printf("❌ MQTT failed rc=%d, restarting...\n", mqttClient.state());
+    delay(4000);
+    ESP.restart();
   }
 }
 
-// ================= ESP-NOW =================
-void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
-{
+// ===============================================================
+// ESP-NOW receive callback — handles 200, 202, 203, 204, 206
+// ===============================================================
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
   sensor_data_t data;
   memcpy(&data, incomingData, sizeof(data));
 
-  if (data.request_code == REQ_SENSOR_DATA)
-  {
-    xQueueSend(mqttQueue, &data, 0);
+  char macStr[18];
+  sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+  switch (data.request_code) {
+
+    // ---- 200: Node ID request → publish to backend ----
+    case REQ_NODE_ID: {
+      Serial.printf("📨 Node ID request (200) from %s\n", macStr);
+      addPeerIfNeeded(mac);
+
+      StaticJsonDocument<128> doc;
+      doc["mac"]          = macStr;
+      doc["request_code"] = REQ_NODE_ID;
+      char payload[128];
+      serializeJson(doc, payload);
+      mqttClient.publish(TOPIC_NODE_REGISTER, payload);
+      Serial.printf("📤 Published 200 to %s\n", TOPIC_NODE_REGISTER);
+      break;
+    }
+
+    // ---- 202: Node confirmed Node ID → publish to backend ----
+    case RES_NODE_CONFIRM: {
+      Serial.printf("📨 Node ID confirmed (202) from %s id=%s\n", macStr, data.node_id);
+      StaticJsonDocument<256> doc;
+      doc["mac"]          = macStr;
+      doc["node_id"]      = data.node_id;
+      doc["request_code"] = RES_NODE_CONFIRM;
+      char payload[256];
+      serializeJson(doc, payload);
+      mqttClient.publish(TOPIC_NODE_CONFIRM_ID, payload);
+      Serial.printf("📤 Published 202 to %s\n", TOPIC_NODE_CONFIRM_ID);
+      break;
+    }
+
+    // ---- 203: Sensor data → push to FreeRTOS queue ----
+    case REQ_SENSOR_DATA: {
+      if (xQueueSend(mqttQueue, &data, 0) != pdTRUE) {
+        Serial.println("⚠️ MQTT queue full, dropping packet");
+      }
+      break;
+    }
+
+    // ---- 204: Task complete → publish to backend ----
+    case REQ_TASK_COMPLETE: {
+      Serial.printf("🔄 Task complete (204) from %s id=%s\n", macStr, data.node_id);
+      addPeerIfNeeded(mac);
+
+      StaticJsonDocument<256> doc;
+      doc["mac"]          = macStr;
+      doc["node_id"]      = data.node_id;
+      doc["request_code"] = REQ_TASK_COMPLETE;
+      char payload[256];
+      serializeJson(doc, payload);
+      mqttClient.publish(TOPIC_NODE_TASK_COMPLETE, payload);
+      Serial.printf("📤 Published 204 to %s\n", TOPIC_NODE_TASK_COMPLETE);
+      break;
+    }
+
+    // ---- 206: Erase confirmed → publish to backend ----
+    case RES_ERASE_CONFIRM: {
+      Serial.printf("🔄 Erase confirmed (206) from %s\n", macStr);
+      StaticJsonDocument<128> doc;
+      doc["mac"]          = macStr;
+      doc["request_code"] = RES_ERASE_CONFIRM;
+      char payload[128];
+      serializeJson(doc, payload);
+      mqttClient.publish(TOPIC_NODE_ERASE_CONFIRM, payload);
+      Serial.printf("📤 Published 206 to %s\n", TOPIC_NODE_ERASE_CONFIRM);
+      break;
+    }
+
+    default:
+      Serial.printf("⚠️ Unknown ESP-NOW code: %d from %s\n", data.request_code, macStr);
+      break;
   }
 }
 
-// ================= Setup =================
-void setup()
-{
+// ===============================================================
+// setup()
+// ===============================================================
+void setup() {
   Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n=== FluidCare Master Node — Protocol 200-206 ===");
+
   pinMode(LED_PIN, OUTPUT);
   ledOff();
 
@@ -157,37 +380,54 @@ void setup()
 
   connectWiFi();
 
-  if (esp_now_init() != ESP_OK)
-  {
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("❌ ESP-NOW init failed");
     ESP.restart();
   }
-
   esp_now_register_recv_cb(onDataRecv);
+  Serial.println("✅ ESP-NOW initialized");
 
   connectMQTT();
+  Serial.println("✅ Master ready\n");
 }
 
-// ================= Loop =================
-void loop()
-{
-  if (!mqttClient.connected())
+// ===============================================================
+// loop()
+// ===============================================================
+void loop() {
+  if (!mqttClient.connected()) {
+    Serial.println("⚠️ MQTT disconnected, reconnecting...");
     connectMQTT();
+  }
 
   mqttClient.loop();
 
-  if (uxQueueMessagesWaiting(mqttQueue))
-  {
-    sensor_data_t d;
-    xQueueReceive(mqttQueue, &d, 0);
+  // Drain queue → publish sensor data (203) to MQTT
+  sensor_data_t d;
+  while (xQueueReceive(mqttQueue, &d, 0) == pdTRUE) {
+    StaticJsonDocument<512> doc;
+    doc["request_code"]    = REQ_SENSOR_DATA;
+    doc["node_id"]         = d.node_id;
+    doc["node_mac"]        = d.node_mac;
+    doc["reading"]         = d.reading;
+    doc["battery_percent"] = d.battery_percent;
+    doc["timestamp"]       = d.timestamp;
+    doc["date"]            = d.date_str;
+    doc["time"]            = d.time_str;
 
-    StaticJsonDocument<256> doc;
-    doc["reading"] = d.reading;
+    char datetime_str[32];
+    sprintf(datetime_str, "%s %s", d.date_str, d.time_str);
+    doc["datetime"] = datetime_str;
 
-    char payload[128];
+    char payload[512];
     serializeJson(doc, payload);
 
-    mqttClient.publish("be_project/node/data", payload);
+    if (mqttClient.publish(TOPIC_NODE_DATA, payload)) {
+      Serial.printf("📤 Published sensor data (203) from %s\n", d.node_id);
+    } else {
+      Serial.println("❌ Failed to publish sensor data");
+    }
   }
 
-  delay(20);
+  delay(30);
 }
