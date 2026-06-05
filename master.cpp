@@ -10,6 +10,8 @@
 //
 // Subscribes to: be_project/master/in  (codes 201, 205 arrive here from backend)
 
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
@@ -28,7 +30,8 @@ const char    *MQTT_CLIENT_ID   = "esp32-master-2026";
 const char    *MQTT_USER        = "kanbs";
 const char    *MQTT_PASS        = "Kartik@3165";
 
-#define LED_PIN 2
+#define LED_PIN    2
+#define BUTTON_PIN 0   // BOOT button, active LOW
 
 // ====== Protocol codes ======
 #define REQ_NODE_ID       200
@@ -86,6 +89,23 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
 WiFiClientSecure espClientSecure;
 PubSubClient     mqttClient(espClientSecure);
+
+// ====== LCD ======
+LiquidCrystal_I2C *lcd = nullptr;
+
+// Display data — written only from loop(), never from ESP-NOW callback
+static float         dispReading  = 0.0f;
+static unsigned long dispDataMs   = 0;
+static char          dispNodeId[13] = "";   // last 12 chars of node_id
+
+// Display page state
+static int           displayPage        = 0;
+static bool          displayNeedsRedraw = true;
+static unsigned long lastPageChange     = 0;   // reset on button press or auto-advance
+
+// Last event — written from onDataRecv (WiFi task), read in loop (main task)
+static char          lastEvent[17]  = "No events yet   ";
+static unsigned long lastEventMs    = 0;
 
 // ====== Shared packet (must match node) ======
 typedef struct sensor_data {
@@ -151,6 +171,142 @@ void ledFlash(int count, int onMs, int gapMs)
         delay(onMs);
         digitalWrite(LED_PIN, LOW);
         if (i < count - 1) delay(gapMs);
+    }
+}
+
+// ====== I2C auto-scan (checks 0x27 and 0x3F) ======
+static uint8_t scanI2C()
+{
+    const uint8_t candidates[] = {0x27, 0x3F};
+    for (uint8_t addr : candidates) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("✅ LCD found at 0x%02X\n", addr);
+            return addr;
+        }
+    }
+    Serial.println("⚠️  LCD not found on I2C, defaulting to 0x27");
+    return 0x27;
+}
+
+// ====== Boot splash ======
+static void showSplash()
+{
+    if (!lcd) return;
+
+    // Screen 1 — project name (2 s)
+    lcd->clear();
+    lcd->setCursor(1, 0); lcd->print("Fluid Monitor");
+    lcd->setCursor(3, 1); lcd->print("using IoT");
+    delay(2000);
+
+    // Screen 2 — team members (2 s)
+    lcd->clear();
+    lcd->setCursor(0, 0); lcd->print("Kartik   Sahil  ");
+    lcd->setCursor(0, 1); lcd->print("Aniket  Atharva ");
+    delay(2000);
+
+    lcd->clear();
+}
+
+// ====== Button handler — GPIO 0 (BOOT, active LOW) ======
+// Press advances to next page (0→1→2→3→0)
+static void handleButton()
+{
+    static bool          prevState   = HIGH;
+    static bool          stableState = HIGH;
+    static unsigned long debounceMs  = 0;
+
+    bool raw = digitalRead(BUTTON_PIN);
+    if (raw != prevState) { debounceMs = millis(); prevState = raw; }
+
+    if ((millis() - debounceMs) > 50 && raw != stableState) {
+        stableState = raw;
+        if (stableState == LOW) {          // falling edge = pressed
+            displayPage        = (displayPage + 1) % 4;
+            displayNeedsRedraw = true;
+            lastPageChange     = millis();  // reset auto-rotation timer
+            Serial.printf("Button → page %d\n", displayPage);
+        }
+    }
+}
+
+// ====== Dashboard update (call from loop only, never from ISR) ======
+// Page 0: connected nodes + repeaters
+// Page 1: last event
+// Page 2: "BE Project" header + scrolling project name marquee
+// Page 3: team splash
+static void updateDisplay()
+{
+    if (!lcd) return;
+
+    static unsigned long lastDrawnEventMs = 0;
+    static unsigned long lastMarqueeMs    = 0;
+    bool                 marqueeTick      = false;
+
+    // Auto-rotate every 7 s (button press resets this timer)
+    if (millis() - lastPageChange >= 7000UL) {
+        lastPageChange     = millis();
+        displayPage        = (displayPage + 1) % 4;
+        displayNeedsRedraw = true;
+    }
+
+    // Auto-refresh page 1 when a new event arrives
+    if (displayPage == 1 && lastEventMs != lastDrawnEventMs)
+        displayNeedsRedraw = true;
+
+    // Marquee tick every 300 ms while on page 2
+    if (displayPage == 2 && millis() - lastMarqueeMs >= 300UL) {
+        lastMarqueeMs      = millis();
+        marqueeTick        = true;
+        displayNeedsRedraw = true;
+    }
+
+    if (!displayNeedsRedraw) return;
+    displayNeedsRedraw = false;
+    if (displayPage == 1) lastDrawnEventMs = lastEventMs;
+
+    // Clear only on page switch — marquee ticks overwrite in-place (no flicker)
+    if (!marqueeTick) lcd->clear();
+
+    char r0[17], r1[17];
+
+    switch (displayPage) {
+    case 0:
+        snprintf(r0, 17, "Nodes:%10d", nodeCount);
+        snprintf(r1, 17, "Repeaters:%6d", 0);   // repeater count — update when implemented
+        lcd->setCursor(0, 0); lcd->print(r0);
+        lcd->setCursor(0, 1); lcd->print(r1);
+        break;
+
+    case 1:
+        lcd->setCursor(0, 0); lcd->print("Last Event:     ");
+        lcd->setCursor(0, 1); lcd->print(lastEvent);
+        break;
+
+    case 2: {
+        static int  marqueeOff = 0;
+        const char *title      = "Automated Fluid Monitoring System using IoT";
+        int         tlen       = strlen(title);
+        int         span       = tlen + 5;  // 5-space gap before repeat
+
+        char row1[17];
+        for (int i = 0; i < 16; i++) {
+            int idx = (marqueeOff + i) % span;
+            row1[i] = (idx < tlen) ? title[idx] : ' ';
+        }
+        row1[16] = '\0';
+        marqueeOff = (marqueeOff + 1) % span;
+
+        if (!marqueeTick) { lcd->setCursor(0, 0); lcd->print("BE Project      "); }
+        lcd->setCursor(0, 1); lcd->print(row1);
+        break;
+    }
+
+    case 3:
+        lcd->setCursor(0, 0); lcd->print("Kartik   Sahil  ");
+        lcd->setCursor(0, 1); lcd->print("Aniket  Atharva ");
+        break;
     }
 }
 
@@ -317,6 +473,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
         bool pub = mqttClient.publish(TOPIC_NODE_REGISTER, payload);
         if (!pub) ledFlash(3, 50, 50); // 3 flashes — publish failed
         Serial.printf("📤 MQTT publish %s: %s\n", TOPIC_NODE_REGISTER, pub ? "OK" : "FAIL");
+        strncpy(lastEvent, "New Device Req. ", 17); lastEventMs = millis();
         break;
     }
 
@@ -331,6 +488,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
         char payload[256];
         serializeJson(doc, payload);
         mqttClient.publish(TOPIC_NODE_CONFIRM_ID, payload);
+        strncpy(lastEvent, "Device Confirmed", 17); lastEventMs = millis();
         break;
     }
 
@@ -354,6 +512,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
         char payload[256];
         serializeJson(doc, payload);
         mqttClient.publish(TOPIC_NODE_TASK_COMPLETE, payload);
+        strncpy(lastEvent, "Task Complete   ", 17); lastEventMs = millis();
         break;
     }
 
@@ -367,6 +526,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
         char payload[128];
         serializeJson(doc, payload);
         mqttClient.publish(TOPIC_NODE_ERASE_CONFIRM, payload);
+        strncpy(lastEvent, "Device Erased   ", 17); lastEventMs = millis();
         break;
     }
 
@@ -381,6 +541,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
         char payload[256];
         serializeJson(doc, payload);
         mqttClient.publish(TOPIC_NODE_DISCONNECT, payload);
+        strncpy(lastEvent, "Device Offline  ", 17); lastEventMs = millis();
         break;
     }
 
@@ -399,10 +560,29 @@ void setup()
 
     pinMode(LED_PIN, OUTPUT);
     ledOff();
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
 
     mqttQueue = xQueueCreate(QUEUE_SIZE, sizeof(sensor_data_t));
 
+    // LCD init — scan I2C, show splash before WiFi connect
+    Wire.begin(21, 22);
+    Wire.setClock(100000);  // 100 kHz — cheap PCF8574 modules unreliable at 400 kHz
+    uint8_t lcdAddr = scanI2C();
+    lcd = new LiquidCrystal_I2C(lcdAddr, 16, 2);
+    lcd->init();
+    lcd->backlight();
+    delay(200);
+    showSplash();
+
+    lcd->clear();
+    lcd->setCursor(0, 0); lcd->print("Connecting WiFi ");
+    lcd->setCursor(0, 1); lcd->print("Please wait...  ");
+
     connectWiFi();
+
+    lcd->clear();
+    lcd->setCursor(0, 0); lcd->print("Connecting MQTT ");
+    lcd->setCursor(0, 1); lcd->print("Please wait...  ");
 
     uint8_t selfMac[6];
     esp_wifi_get_mac(WIFI_IF_STA, selfMac);
@@ -417,6 +597,12 @@ void setup()
     Serial.println("✅ ESP-NOW initialized");
 
     connectMQTT();
+
+    lcd->clear();
+    lcd->setCursor(2, 0); lcd->print("System Ready!");
+    delay(1000);
+    lcd->clear();
+
     Serial.println("✅ Master ready\n");
 }
 
@@ -447,7 +633,21 @@ void loop()
             Serial.printf("📤 Published sensor data from %s\n", d.node_id);
         else
             Serial.println("❌ Failed to publish sensor data");
+
+        // Update display vars (safe here — loop task only)
+        dispReading = d.reading;
+        dispDataMs  = millis();
+        int nlen = strlen(d.node_id);
+        if (nlen > 12)
+            strncpy(dispNodeId, d.node_id + nlen - 12, 13);
+        else {
+            strncpy(dispNodeId, d.node_id, 13);
+            dispNodeId[12] = '\0';
+        }
     }
+
+    handleButton();
+    updateDisplay();
 
     delay(30);
 }
