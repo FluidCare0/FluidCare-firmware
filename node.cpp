@@ -263,7 +263,7 @@ void setup()
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     digitalWrite(LED_PIN, LOW);
 
-    prefs.begin("node_cfg", true);
+    prefs.begin("node_cfg", false);
     String saved = prefs.getString("node_id", "");
     prefs.end();
     if (saved.length() > 0) {
