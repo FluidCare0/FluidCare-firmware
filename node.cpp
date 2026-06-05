@@ -35,10 +35,10 @@
 #define TRANSMIT_DELTA_G 1.0f
 
 // ====== Timing ======
-#define SEND_INTERVAL_MS  5000
+#define SEND_INTERVAL_MS  3000
 #define IDLE_SLEEP_MS     80
 #define LONG_PRESS_MS     2000
-#define NODE_ID_RETRY_MS  10000
+#define NODE_ID_RETRY_MS  3000
 
 // ====== Protocol codes ======
 #define REQ_NODE_ID       200
@@ -236,12 +236,13 @@ static void sendDisconnect()
     strncpy(pkt.node_id,  nodeId,  sizeof(pkt.node_id)  - 1);
     strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
     sendPacket(pkt);
+    eraseNode();           // erase NVS immediately — stops sensor data, prevents double-send
     ledFlash(3, 300, 100); // 3 long pulses — going offline
-    Serial.println("📤 REQ_DISCONNECT (207)");
+    Serial.println("📤 REQ_DISCONNECT (207) — NVS erased");
 }
 
 // ====== ESP-NOW receive ======
-void onDataRecv(const uint8_t *, const uint8_t *data, int)
+void onDataRecv(const uint8_t *mac, const uint8_t *data, int len)
 {
     sensor_data_t pkt;
     memcpy(&pkt, data, sizeof(pkt));
@@ -287,7 +288,11 @@ void onDataSent(const uint8_t *, esp_now_send_status_t st)
     Serial.printf("📡 Send %s\n", st == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
 }
 
-// ====== Button ======
+// ====== Button (BOOT GPIO0) ======
+// Short press  (< 2s):  ignored
+// Long press   (≥ 2s):  send disconnect (207)
+// Ultra press  (≥ 10s): erase NVS flash
+#define ERASE_PRESS_MS 10000
 void handleButton()
 {
     static unsigned long pressedAt = 0;
@@ -298,37 +303,23 @@ void handleButton()
     if (pressed && !wasPressed) {
         pressedAt  = millis();
         wasPressed = true;
+        Serial.println("🔘 Button pressed");
     } else if (!pressed && wasPressed) {
         unsigned long held = millis() - pressedAt;
         wasPressed = false;
-        if (held >= LONG_PRESS_MS) {
+        if (held >= ERASE_PRESS_MS) {
+            Serial.println("🗑️ Ultra press — erasing NVS flash");
             eraseNode();
+        } else if (held >= LONG_PRESS_MS) {
+            if (nodeIdAssigned) {
+                Serial.println("📤 Long press — sending disconnect");
+                sendDisconnect();
+            } else {
+                Serial.println("⚠️ Long press — no node ID yet, ignored");
+            }
+        } else {
+            Serial.println("🔘 Short press — ignored");
         }
-        requestNodeId();
-    }
-}
-
-// ====== Disconnect button ======
-// GPIO 13, INPUT_PULLUP — press ≥500ms sends disconnect (207)
-#define DISCONNECT_HOLD_MS 500
-void handleDisconnectButton()
-{
-    static unsigned long pressedAt = 0;
-    static bool          wasPressed = false;
-
-    bool pressed = (digitalRead(DISCONNECT_BTN_PIN) == LOW);
-
-    if (pressed && !wasPressed) {
-        pressedAt  = millis();
-        wasPressed = true;
-    } else if (!pressed && wasPressed) {
-        unsigned long held = millis() - pressedAt;
-        wasPressed = false;
-        if (held < DISCONNECT_HOLD_MS) return;
-        if (nodeIdAssigned)
-            sendDisconnect();
-        else
-            Serial.println("⚠️ Disconnect ignored — no node ID yet");
     }
 }
 
@@ -339,9 +330,8 @@ void setup()
     delay(1000);
     Serial.println("\n=== FluidCare Node ===");
 
-    pinMode(LED_PIN,            OUTPUT);
-    pinMode(BUTTON_PIN,         INPUT_PULLUP);
-    pinMode(DISCONNECT_BTN_PIN, INPUT_PULLUP);
+    pinMode(LED_PIN,    OUTPUT);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
     digitalWrite(LED_PIN, LOW);
 
     prefs.begin("node_cfg", false);
@@ -397,7 +387,6 @@ void setup()
 void loop()
 {
     handleButton();
-    handleDisconnectButton();
     sampleLoadCell();
     updateStatusLed();
 
