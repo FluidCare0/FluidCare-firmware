@@ -20,7 +20,7 @@
 #define HX711_DOUT_PIN     4
 #define HX711_SCK_PIN      5
 #define BUTTON_PIN         0    // BOOT button — long press = erase NVS
-#define DISCONNECT_BTN_PIN 35   // dedicated button — press = send disconnect (207)
+#define DISCONNECT_BTN_PIN 13   // dedicated button — press = send disconnect (207)
 #define LED_PIN            2
 
 // ====== WiFi channel (must match master) ======
@@ -200,8 +200,6 @@ void sendSensorData()
     strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
     pkt.reading   = weight;
     pkt.timestamp = (uint32_t)(millis() / 1000UL);
-    strncpy(pkt.date_str, "1970-01-01", sizeof(pkt.date_str) - 1); // TODO: RTC
-    strncpy(pkt.time_str, "00:00:00",   sizeof(pkt.time_str) - 1); // TODO: RTC
     pkt.via = 0;
 
     sendPacket(pkt);
@@ -311,6 +309,8 @@ void handleButton()
 }
 
 // ====== Disconnect button ======
+// GPIO 13, INPUT_PULLUP — press ≥500ms sends disconnect (207)
+#define DISCONNECT_HOLD_MS 500
 void handleDisconnectButton()
 {
     static unsigned long pressedAt = 0;
@@ -322,7 +322,9 @@ void handleDisconnectButton()
         pressedAt  = millis();
         wasPressed = true;
     } else if (!pressed && wasPressed) {
+        unsigned long held = millis() - pressedAt;
         wasPressed = false;
+        if (held < DISCONNECT_HOLD_MS) return;
         if (nodeIdAssigned)
             sendDisconnect();
         else
@@ -405,6 +407,5 @@ void loop()
     if (nodeIdAssigned && millis() - lastSendMs >= SEND_INTERVAL_MS)
         sendSensorData();
 
-    esp_sleep_enable_timer_wakeup((uint64_t)IDLE_SLEEP_MS * 1000ULL);
-    esp_light_sleep_start();
+    delay(IDLE_SLEEP_MS);
 }

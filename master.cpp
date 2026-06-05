@@ -433,18 +433,12 @@ void loop()
     // Drain queue → publish sensor data to MQTT
     sensor_data_t d;
     while (xQueueReceive(mqttQueue, &d, 0) == pdTRUE) {
-        char datetime_str[32];
-        sprintf(datetime_str, "%s %s", d.date_str, d.time_str);
-
         StaticJsonDocument<512> doc;
-        doc["request_code"]    = REQ_SENSOR_DATA;
-        doc["node_id"]         = d.node_id;
-        doc["node_mac"]        = d.node_mac;
-        doc["reading"]   = d.reading;
-        doc["timestamp"] = d.timestamp;
-        doc["date"]            = d.date_str;
-        doc["time"]            = d.time_str;
-        doc["datetime"]        = datetime_str;
+        doc["request_code"] = REQ_SENSOR_DATA;
+        doc["node_id"]      = d.node_id;
+        doc["node_mac"]     = d.node_mac;
+        doc["reading"]      = d.reading;
+        doc["timestamp"]    = d.timestamp;
 
         char payload[512];
         serializeJson(doc, payload);
