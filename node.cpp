@@ -17,10 +17,11 @@
 #include <algorithm>
 
 // ====== Pins ======
-#define HX711_DOUT_PIN 4
-#define HX711_SCK_PIN  5
-#define BUTTON_PIN     0    // BOOT button — active LOW
-#define LED_PIN        2
+#define HX711_DOUT_PIN     4
+#define HX711_SCK_PIN      5
+#define BUTTON_PIN         0    // BOOT button — long press = erase NVS
+#define DISCONNECT_BTN_PIN 35   // dedicated button — press = send disconnect (207)
+#define LED_PIN            2
 
 // ====== WiFi channel (must match master) ======
 #define WIFI_CHANNEL 3
@@ -46,6 +47,7 @@
 #define REQ_SENSOR_DATA   203
 #define RES_ERASE_FLASH   205
 #define RES_ERASE_CONFIRM 206
+#define REQ_DISCONNECT    207
 
 // ====== Shared packet (must match master) ======
 typedef struct sensor_data {
@@ -53,7 +55,6 @@ typedef struct sensor_data {
     char     node_id[37];
     char     node_mac[18];
     float    reading;
-    float    battery_percent;
     uint32_t timestamp;
     char     date_str[11];
     char     time_str[9];
@@ -80,6 +81,38 @@ int     bufCount = 0;
 float         lastTxWeight = -9999.0f;
 unsigned long lastSendMs   = 0;
 unsigned long lastIdReqMs  = 0;
+
+// ====== LED ======
+// Pattern legend:
+//   1× short  (50ms)  — data sent (203)
+//   1× medium (150ms) — ID request sent (200)
+//   3× fast   (80ms)  — ID assigned / confirmed (201 / 202)
+//   5× rapid  (60ms)  — erase NVS (205)
+//   3× long   (300ms) — disconnect sent (207)
+//   300ms blink loop  — waiting for ID
+//   2000ms blink loop — normal idle heartbeat
+void ledFlash(int count, int onMs, int gapMs)
+{
+    for (int i = 0; i < count; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(onMs);
+        digitalWrite(LED_PIN, LOW);
+        if (i < count - 1) delay(gapMs);
+    }
+}
+
+void updateStatusLed()
+{
+    static unsigned long lastToggle = 0;
+    static bool          ledState   = false;
+    unsigned long        interval   = nodeIdAssigned ? 2000UL : 300UL;
+    unsigned long        now        = millis();
+    if (now - lastToggle >= interval) {
+        lastToggle = now;
+        ledState   = !ledState;
+        digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    }
+}
 
 // ====== Calibration ======
 inline float rawToGrams(int32_t raw)
@@ -140,6 +173,7 @@ void requestNodeId()
     strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
     sendPacket(pkt);
     lastIdReqMs = millis();
+    ledFlash(1, 150, 0);   // 1 medium flash — ID request sent
     Serial.println("📤 REQ_NODE_ID (200)");
 }
 
@@ -150,6 +184,7 @@ static void confirmNodeId()
     strncpy(pkt.node_id,  nodeId,  sizeof(pkt.node_id)  - 1);
     strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
     sendPacket(pkt);
+    ledFlash(3, 80, 80);   // 3 fast flashes — ID confirmed
     Serial.printf("📤 RES_NODE_CONFIRM (202) id=%s\n", nodeId);
 }
 
@@ -163,9 +198,8 @@ void sendSensorData()
     pkt.request_code = REQ_SENSOR_DATA;
     strncpy(pkt.node_id,  nodeId,  sizeof(pkt.node_id)  - 1);
     strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
-    pkt.reading         = weight;
-    pkt.battery_percent = 100.0f;   // TODO: read from ADC
-    pkt.timestamp       = (uint32_t)(millis() / 1000UL);
+    pkt.reading   = weight;
+    pkt.timestamp = (uint32_t)(millis() / 1000UL);
     strncpy(pkt.date_str, "1970-01-01", sizeof(pkt.date_str) - 1); // TODO: RTC
     strncpy(pkt.time_str, "00:00:00",   sizeof(pkt.time_str) - 1); // TODO: RTC
     pkt.via = 0;
@@ -173,6 +207,7 @@ void sendSensorData()
     sendPacket(pkt);
     lastTxWeight = weight;
     lastSendMs   = millis();
+    ledFlash(1, 50, 0);    // 1 short flash — sensor data sent
     Serial.printf("📤 REQ_SENSOR_DATA (203) %.2f g\n", weight);
 }
 
@@ -186,6 +221,7 @@ static void saveNodeId(const char *id)
 
 static void eraseNode()
 {
+    ledFlash(5, 60, 60);   // 5 rapid flashes — erasing NVS
     prefs.begin("node_cfg", false);
     prefs.clear();
     prefs.end();
@@ -193,6 +229,17 @@ static void eraseNode()
     nodeIdAssigned = false;
     lastTxWeight   = -9999.0f;
     Serial.println("🗑️ NVS cleared");
+}
+
+static void sendDisconnect()
+{
+    sensor_data_t pkt = {};
+    pkt.request_code = REQ_DISCONNECT;
+    strncpy(pkt.node_id,  nodeId,  sizeof(pkt.node_id)  - 1);
+    strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
+    sendPacket(pkt);
+    ledFlash(3, 300, 100); // 3 long pulses — going offline
+    Serial.println("📤 REQ_DISCONNECT (207)");
 }
 
 // ====== ESP-NOW receive ======
@@ -207,6 +254,7 @@ void onDataRecv(const uint8_t *, const uint8_t *data, int)
         strncpy(nodeId, pkt.node_id, sizeof(nodeId) - 1);
         nodeIdAssigned = true;
         saveNodeId(nodeId);
+        ledFlash(3, 80, 80);   // 3 fast flashes — ID received from master
         Serial.printf("✅ Node-ID assigned: %s\n", nodeId);
         confirmNodeId();
         break;
@@ -231,6 +279,8 @@ void onDataRecv(const uint8_t *, const uint8_t *data, int)
 
 void onDataSent(const uint8_t *, esp_now_send_status_t st)
 {
+    if (st != ESP_NOW_SEND_SUCCESS)
+        ledFlash(2, 50, 50); // 2 quick flashes — send failed
     Serial.printf("📡 Send %s\n", st == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
 }
 
@@ -255,6 +305,26 @@ void handleButton()
     }
 }
 
+// ====== Disconnect button ======
+void handleDisconnectButton()
+{
+    static unsigned long pressedAt = 0;
+    static bool          wasPressed = false;
+
+    bool pressed = (digitalRead(DISCONNECT_BTN_PIN) == LOW);
+
+    if (pressed && !wasPressed) {
+        pressedAt  = millis();
+        wasPressed = true;
+    } else if (!pressed && wasPressed) {
+        wasPressed = false;
+        if (nodeIdAssigned)
+            sendDisconnect();
+        else
+            Serial.println("⚠️ Disconnect ignored — no node ID yet");
+    }
+}
+
 // ====== Setup ======
 void setup()
 {
@@ -262,8 +332,9 @@ void setup()
     delay(1000);
     Serial.println("\n=== FluidCare Node ===");
 
-    pinMode(LED_PIN,    OUTPUT);
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(LED_PIN,            OUTPUT);
+    pinMode(BUTTON_PIN,         INPUT_PULLUP);
+    pinMode(DISCONNECT_BTN_PIN, INPUT_PULLUP);
     digitalWrite(LED_PIN, LOW);
 
     prefs.begin("node_cfg", false);
@@ -319,7 +390,9 @@ void setup()
 void loop()
 {
     handleButton();
+    handleDisconnectButton();
     sampleLoadCell();
+    updateStatusLed();
 
     if (!nodeIdAssigned && millis() - lastIdReqMs >= NODE_ID_RETRY_MS)
         requestNodeId();

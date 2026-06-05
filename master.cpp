@@ -38,6 +38,7 @@ const char    *MQTT_PASS        = "Kartik@3165";
 #define REQ_TASK_COMPLETE 204
 #define RES_ERASE_FLASH   205
 #define RES_ERASE_CONFIRM 206
+#define REQ_DISCONNECT    207
 
 // ====== MQTT topics ======
 #define TOPIC_MASTER_IN          "be_project/master/in"
@@ -46,6 +47,7 @@ const char    *MQTT_PASS        = "Kartik@3165";
 #define TOPIC_NODE_DATA          "be_project/node/data"
 #define TOPIC_NODE_TASK_COMPLETE "be_project/node/task_complete"
 #define TOPIC_NODE_ERASE_CONFIRM "be_project/node/erase_confirm"
+#define TOPIC_NODE_DISCONNECT    "be_project/disconnect"
 
 // ====== ISRG Root X1 CA cert (HiveMQ TLS) ======
 static const char ISRG_ROOT_X1[] PROGMEM = R"EOF(
@@ -91,7 +93,6 @@ typedef struct sensor_data {
     char     node_id[37];
     char     node_mac[18];
     float    reading;
-    float    battery_percent;
     uint32_t timestamp;
     char     date_str[11];
     char     time_str[9];
@@ -110,6 +111,13 @@ uint8_t registeredNodes[MAX_NODES][6];
 int     nodeCount = 0;
 
 // ====== LED helpers ======
+// Pattern legend (master — LED solid ON when MQTT connected):
+//   ledDip(1, 30ms)  — any ESP-NOW received
+//   ledDip(2, 50ms)  — register / task-complete / disconnect received
+//   ledDip(3, 80ms)  — erase confirm received
+//   ledFlash(3,50ms) — MQTT publish failed (error, LED may be off)
+//   ledBlink(300ms)  — WiFi connecting
+//   ledOn()          — MQTT connected (solid)
 void ledBlink(unsigned long intervalMs)
 {
     static unsigned long lastToggle = 0;
@@ -123,6 +131,28 @@ void ledBlink(unsigned long intervalMs)
 }
 void ledOn()  { digitalWrite(LED_PIN, HIGH); }
 void ledOff() { digitalWrite(LED_PIN, LOW);  }
+
+// Brief OFF dips — activity indicator while MQTT LED stays solid
+void ledDip(int count, int dipMs)
+{
+    for (int i = 0; i < count; i++) {
+        digitalWrite(LED_PIN, LOW);
+        delay(dipMs);
+        digitalWrite(LED_PIN, HIGH);
+        if (i < count - 1) delay(dipMs);
+    }
+}
+
+// Solid flashes — for errors when LED may be off
+void ledFlash(int count, int onMs, int gapMs)
+{
+    for (int i = 0; i < count; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(onMs);
+        digitalWrite(LED_PIN, LOW);
+        if (i < count - 1) delay(gapMs);
+    }
+}
 
 // ====== ESP-NOW peer management ======
 bool addPeerIfNeeded(const uint8_t *mac)
@@ -277,6 +307,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     case REQ_NODE_ID:
     {
         Serial.printf("📨 REQ_NODE_ID (200) from %s\n", macStr);
+        ledDip(2, 50);     // 2 dips — register request received
         addPeerIfNeeded(mac);
         StaticJsonDocument<128> doc;
         doc["mac"]          = macStr;
@@ -284,6 +315,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
         char payload[128];
         serializeJson(doc, payload);
         bool pub = mqttClient.publish(TOPIC_NODE_REGISTER, payload);
+        if (!pub) ledFlash(3, 50, 50); // 3 flashes — publish failed
         Serial.printf("📤 MQTT publish %s: %s\n", TOPIC_NODE_REGISTER, pub ? "OK" : "FAIL");
         break;
     }
@@ -291,6 +323,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     case RES_NODE_CONFIRM:
     {
         Serial.printf("📨 RES_NODE_CONFIRM (202) from %s id=%s\n", macStr, data.node_id);
+        ledDip(1, 50);     // 1 dip — confirm received
         StaticJsonDocument<256> doc;
         doc["mac"]          = macStr;
         doc["node_id"]      = data.node_id;
@@ -303,6 +336,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
 
     case REQ_SENSOR_DATA:
     {
+        ledDip(1, 30);     // 1 quick dip — sensor data received
         if (xQueueSend(mqttQueue, &data, 0) != pdTRUE)
             Serial.println("⚠️ Queue full, dropping packet");
         break;
@@ -311,6 +345,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     case REQ_TASK_COMPLETE:
     {
         Serial.printf("📨 REQ_TASK_COMPLETE (204) from %s id=%s\n", macStr, data.node_id);
+        ledDip(2, 50);     // 2 dips — task complete received
         addPeerIfNeeded(mac);
         StaticJsonDocument<256> doc;
         doc["mac"]          = macStr;
@@ -325,12 +360,27 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     case RES_ERASE_CONFIRM:
     {
         Serial.printf("📨 RES_ERASE_CONFIRM (206) from %s\n", macStr);
+        ledDip(3, 80);     // 3 dips — erase confirmed
         StaticJsonDocument<128> doc;
         doc["mac"]          = macStr;
         doc["request_code"] = RES_ERASE_CONFIRM;
         char payload[128];
         serializeJson(doc, payload);
         mqttClient.publish(TOPIC_NODE_ERASE_CONFIRM, payload);
+        break;
+    }
+
+    case REQ_DISCONNECT:
+    {
+        Serial.printf("📨 REQ_DISCONNECT (207) from %s id=%s\n", macStr, data.node_id);
+        ledDip(2, 100);    // 2 slow dips — node going offline
+        StaticJsonDocument<256> doc;
+        doc["mac"]          = macStr;
+        doc["node_id"]      = data.node_id;
+        doc["request_code"] = REQ_DISCONNECT;
+        char payload[256];
+        serializeJson(doc, payload);
+        mqttClient.publish(TOPIC_NODE_DISCONNECT, payload);
         break;
     }
 
@@ -390,9 +440,8 @@ void loop()
         doc["request_code"]    = REQ_SENSOR_DATA;
         doc["node_id"]         = d.node_id;
         doc["node_mac"]        = d.node_mac;
-        doc["reading"]         = d.reading;
-        doc["battery_percent"] = d.battery_percent;
-        doc["timestamp"]       = d.timestamp;
+        doc["reading"]   = d.reading;
+        doc["timestamp"] = d.timestamp;
         doc["date"]            = d.date_str;
         doc["time"]            = d.time_str;
         doc["datetime"]        = datetime_str;
