@@ -351,6 +351,11 @@ void setup()
 
     connectWiFi();
 
+    uint8_t selfMac[6];
+    esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+    Serial.printf("📟 Master MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  selfMac[0], selfMac[1], selfMac[2], selfMac[3], selfMac[4], selfMac[5]);
+
     if (esp_now_init() != ESP_OK) {
         Serial.println("❌ ESP-NOW init failed");
         ESP.restart();
