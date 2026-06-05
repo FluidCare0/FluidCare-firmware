@@ -23,7 +23,7 @@
 #define LED_PIN        2
 
 // ====== WiFi channel (must match master) ======
-#define WIFI_CHANNEL 5
+#define WIFI_CHANNEL 3
 
 // ====== Calibration (7-point least-squares, see reading.csv) ======
 #define CALIB_M 0.00119454f
