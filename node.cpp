@@ -248,9 +248,14 @@ void onDataRecv(const uint8_t *, const uint8_t *data, int)
     sensor_data_t pkt;
     memcpy(&pkt, data, sizeof(pkt));
 
+    Serial.printf("📥 onDataRecv: len=%d code=%d from=%02X:%02X:%02X:%02X:%02X:%02X\n",
+                  len, pkt.request_code,
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
     switch (pkt.request_code)
     {
     case RES_NODE_ASSIGN:
+        Serial.printf("💾 Saving node_id: %s\n", pkt.node_id);
         strncpy(nodeId, pkt.node_id, sizeof(nodeId) - 1);
         nodeIdAssigned = true;
         saveNodeId(nodeId);
