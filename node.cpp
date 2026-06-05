@@ -125,9 +125,12 @@ void sampleLoadCell()
 // ====== Send helpers ======
 static void sendPacket(sensor_data_t &pkt)
 {
+    Serial.printf("📡 espnow_send code=%d size=%d to=%02X:%02X:%02X:%02X:%02X:%02X\n",
+                  pkt.request_code, sizeof(pkt),
+                  masterMAC[0], masterMAC[1], masterMAC[2],
+                  masterMAC[3], masterMAC[4], masterMAC[5]);
     esp_err_t r = esp_now_send(masterMAC, (const uint8_t *)&pkt, sizeof(pkt));
-    if (r != ESP_OK)
-        Serial.printf("❌ ESP-NOW send error: %d\n", r);
+    Serial.printf("   send queued: %s (err=%d)\n", r == ESP_OK ? "OK" : "FAIL", r);
 }
 
 void requestNodeId()
@@ -273,20 +276,26 @@ void setup()
     }
 
     WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
     WiFi.setSleep(false);
-    esp_wifi_start();
-    esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+    esp_err_t chErr = esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    uint8_t actualCh; wifi_second_chan_t sch2;
+    esp_wifi_get_channel(&actualCh, &sch2);
+    Serial.printf("📡 Channel set=%d err=%d actual=%d\n", WIFI_CHANNEL, chErr, actualCh);
 
     uint8_t mac[6];
     esp_wifi_get_mac(WIFI_IF_STA, mac);
     sprintf(nodeMac, "%02X:%02X:%02X:%02X:%02X:%02X",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     Serial.printf("📟 Node MAC: %s\n", nodeMac);
+    Serial.printf("🎯 Target master MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  masterMAC[0], masterMAC[1], masterMAC[2],
+                  masterMAC[3], masterMAC[4], masterMAC[5]);
 
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("❌ ESP-NOW init failed");
-        ESP.restart();
-    }
+    esp_err_t nowErr = esp_now_init();
+    Serial.printf("📶 ESP-NOW init: %s (err=%d)\n", nowErr == ESP_OK ? "OK" : "FAIL", nowErr);
+    if (nowErr != ESP_OK) ESP.restart();
     esp_now_register_recv_cb(onDataRecv);
     esp_now_register_send_cb(onDataSent);
 
@@ -294,7 +303,8 @@ void setup()
     memcpy(peer.peer_addr, masterMAC, 6);
     peer.channel = WIFI_CHANNEL;
     peer.encrypt = false;
-    esp_now_add_peer(&peer);
+    esp_err_t peerErr = esp_now_add_peer(&peer);
+    Serial.printf("👥 Add peer: %s (err=%d)\n", peerErr == ESP_OK ? "OK" : "FAIL", peerErr);
 
     scale.begin(HX711_DOUT_PIN, HX711_SCK_PIN);
     Serial.println("✅ HX711 initialized");

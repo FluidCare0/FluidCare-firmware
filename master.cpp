@@ -270,6 +270,8 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
+    Serial.printf("📥 ESP-NOW recv: len=%d from=%s code=%d\n", len, macStr, data.request_code);
+
     switch (data.request_code)
     {
     case REQ_NODE_ID:
@@ -281,7 +283,8 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
         doc["request_code"] = REQ_NODE_ID;
         char payload[128];
         serializeJson(doc, payload);
-        mqttClient.publish(TOPIC_NODE_REGISTER, payload);
+        bool pub = mqttClient.publish(TOPIC_NODE_REGISTER, payload);
+        Serial.printf("📤 MQTT publish %s: %s\n", TOPIC_NODE_REGISTER, pub ? "OK" : "FAIL");
         break;
     }
 
