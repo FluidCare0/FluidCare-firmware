@@ -82,7 +82,11 @@ static bool macEqual(const uint8_t *a, const uint8_t *b)
 
 static bool addPeerIfNeeded(const uint8_t *mac)
 {
-    if (esp_now_is_peer_exist(mac)) return true;
+    if (esp_now_is_peer_exist(mac)) {
+        Serial.printf("👥 Peer already known: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        return true;
+    }
 
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, mac, 6);
@@ -94,7 +98,8 @@ static bool addPeerIfNeeded(const uint8_t *mac)
                       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         return true;
     }
-    Serial.println("❌ Failed to add peer");
+    Serial.printf("❌ Failed to add peer: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return false;
 }
 
@@ -104,16 +109,22 @@ static bool parseMacString(const char *macStr, uint8_t *out)
                   &out[0], &out[1], &out[2], &out[3], &out[4], &out[5]) == 6;
 }
 
-static void espnowSendWithRetry(const uint8_t *mac, const sensor_data_t &pkt)
+static void espnowSendWithRetry(const uint8_t *mac, const sensor_data_t &pkt, const char *dest)
 {
+    Serial.printf("📤 Forward code=%d → %s (%02X:%02X:%02X:%02X:%02X:%02X)\n",
+                  pkt.request_code, dest,
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     for (int i = 0; i < 3; i++) {
         if (esp_now_send(mac, (const uint8_t *)&pkt, sizeof(pkt)) == ESP_OK) {
-            Serial.printf("✅ Forwarded (attempt %d)\n", i + 1);
+            Serial.printf("✅ Forwarded code=%d → %s (attempt %d)\n", pkt.request_code, dest, i + 1);
             return;
         }
-        Serial.printf("⚠️ Forward failed (attempt %d)\n", i + 1);
+        Serial.printf("⚠️ Forward failed code=%d → %s (attempt %d/3)\n", pkt.request_code, dest, i + 1);
         delay(100);
     }
+    Serial.printf("❌ All 3 attempts failed code=%d → %s (%02X:%02X:%02X:%02X:%02X:%02X)\n",
+                  pkt.request_code, dest,
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ledFlash(3, 30, 30);   // 3 rapid — send failed after all retries
 }
 
@@ -139,7 +150,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
         }
         Serial.printf("📡 Downlink code=%d → node %s\n", pkt.request_code, pkt.node_mac);
         addPeerIfNeeded(nodeMac);
-        espnowSendWithRetry(nodeMac, pkt);
+        espnowSendWithRetry(nodeMac, pkt, "node");
         ledFlash(2, 50, 50);   // 2 flashes — downlink forwarded
     } else {
         // ── Uplink: node → master ────────────────────────────────────────
@@ -152,19 +163,23 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
             if (macEqual(knownNodes[i], mac)) { known = true; break; }
         if (!known && knownNodeCount < MAX_NODE_PEERS) {
             memcpy(knownNodes[knownNodeCount++], mac, 6);
+            Serial.printf("🆕 New node tracked: %s (total=%d/%d)\n", macStr, knownNodeCount, MAX_NODE_PEERS);
             addPeerIfNeeded(mac);   // ensure we can send back to it
+        } else if (!known) {
+            Serial.printf("⚠️ MAX_NODE_PEERS (%d) reached — cannot track %s\n", MAX_NODE_PEERS, macStr);
+        } else {
+            Serial.printf("👥 Known node: %s\n", macStr);
         }
 
         Serial.printf("📡 Uplink code=%d from node %s → master\n", pkt.request_code, macStr);
-        espnowSendWithRetry(masterMAC, pkt);
+        espnowSendWithRetry(masterMAC, pkt, "master");
         ledFlash(1, 50, 0);    // 1 flash — uplink forwarded
     }
 }
 
 void onDataSent(const uint8_t *, esp_now_send_status_t st)
 {
-    if (st != ESP_NOW_SEND_SUCCESS)
-        Serial.println("⚠️ Send callback: FAIL");
+    Serial.printf("📡 Send callback: %s\n", st == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
 }
 
 // ====== setup ======
@@ -199,6 +214,7 @@ void setup()
         Serial.println("❌ ESP-NOW init failed, restarting...");
         ESP.restart();
     }
+    Serial.println("📶 ESP-NOW init: OK");
     esp_now_register_recv_cb(onDataRecv);
     esp_now_register_send_cb(onDataSent);
 
