@@ -17,50 +17,51 @@
 #include <algorithm>
 
 // ====== Pins ======
-#define HX711_DOUT_PIN     4
-#define HX711_SCK_PIN      5
-#define BUTTON_PIN         0    // BOOT button — long press = erase NVS
-#define DISCONNECT_BTN_PIN 13   // dedicated button — press = send disconnect (207)
-#define LED_PIN            2
+#define HX711_DOUT_PIN 4
+#define HX711_SCK_PIN 5
+#define BUTTON_PIN 0          // BOOT button — long press = erase NVS
+#define DISCONNECT_BTN_PIN 13 // dedicated button — press = send disconnect (207)
+#define LED_PIN 2
 
 // ====== WiFi channel (must match master's hotspot channel) ======
 #define WIFI_CHANNEL 6
 
-// ====== Calibration (7-point least-squares, see reading.csv) ======
-#define CALIB_M 0.00119454f
-#define CALIB_B 682.7990f
+// ====== Calibration (least-squares fit: 7,856 readings × 13 known weights, R²=0.99949) ======
+#define CALIB_M 0.00118721f
+#define CALIB_B 683.2995f
 
 // ====== Filtering ======
 #define ROLLING_BUF_SIZE 10
 #define TRANSMIT_DELTA_G 1.0f
 
 // ====== Timing ======
-#define SEND_INTERVAL_MS  3000
-#define IDLE_SLEEP_MS     80
-#define LONG_PRESS_MS     2000
-#define NODE_ID_RETRY_MS  3000
+#define SEND_INTERVAL_MS 3000
+#define IDLE_SLEEP_MS 80
+#define LONG_PRESS_MS 2000
+#define NODE_ID_RETRY_MS 3000
 
 // ====== Protocol codes ======
-#define REQ_NODE_ID       200
-#define RES_NODE_ASSIGN   201
-#define RES_NODE_CONFIRM  202
-#define REQ_SENSOR_DATA   203
-#define RES_ERASE_FLASH   205
+#define REQ_NODE_ID 200
+#define RES_NODE_ASSIGN 201
+#define RES_NODE_CONFIRM 202
+#define REQ_SENSOR_DATA 203
+#define RES_ERASE_FLASH 205
 #define RES_ERASE_CONFIRM 206
-#define REQ_DISCONNECT    207
+#define REQ_DISCONNECT 207
 
 // ====== Shared packet (must match master) ======
-typedef struct sensor_data {
+typedef struct sensor_data
+{
     uint16_t request_code;
-    char     node_id[37];
-    char     node_mac[18];
-    float    reading;
+    char node_id[37];
+    char node_mac[18];
+    float reading;
     uint32_t timestamp;
-    char     date_str[11];
-    char     time_str[9];
-    uint8_t  via;
-    char     repeater_mac[18];
-    char     master_mac[18];
+    char date_str[11];
+    char time_str[9];
+    uint8_t via;
+    char repeater_mac[18];
+    char master_mac[18];
 } sensor_data_t;
 
 // ====== Target MAC ======
@@ -72,29 +73,29 @@ uint8_t masterMAC[] = {0x6C, 0xC8, 0x40, 0x35, 0x58, 0xC8};
 // Repeater fallback: if a direct send to master reports FAIL (out of range),
 // the same packet is resent once to this repeater, which relays it to master.
 // Replace with your repeater's MAC (printed on Serial at repeater boot).
-uint8_t repeaterMAC[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+uint8_t repeaterMAC[] = {0xA4, 0xF0, 0x0F, 0x61, 0x8E, 0xF4};
 
 // ====== State ======
 Preferences prefs;
-HX711       scale;
+HX711 scale;
 
-char  nodeMac[18] = "";
-char  nodeId[37]  = "";
-bool  nodeIdAssigned = false;
+char nodeMac[18] = "";
+char nodeId[37] = "";
+bool nodeIdAssigned = false;
 
 int32_t rawBuf[ROLLING_BUF_SIZE];
-int     bufIndex = 0;
-int     bufCount = 0;
+int bufIndex = 0;
+int bufCount = 0;
 
-float         lastTxWeight = -9999.0f;
-unsigned long lastSendMs   = 0;
-unsigned long lastIdReqMs  = 0;
+float lastTxWeight = -9999.0f;
+unsigned long lastSendMs = 0;
+unsigned long lastIdReqMs = 0;
 
 // ====== Repeater failover state ======
 // Holds the last packet sent direct to master, so onDataSent can resend it via
 // the repeater if delivery fails. triedRepeater stops a second fallback hop.
 sensor_data_t lastPkt;
-bool          triedRepeater = false;
+bool triedRepeater = false;
 
 // ====== LED ======
 // Pattern legend:
@@ -107,23 +108,26 @@ bool          triedRepeater = false;
 //   2000ms blink loop — normal idle heartbeat
 void ledFlash(int count, int onMs, int gapMs)
 {
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count; i++)
+    {
         digitalWrite(LED_PIN, HIGH);
         delay(onMs);
         digitalWrite(LED_PIN, LOW);
-        if (i < count - 1) delay(gapMs);
+        if (i < count - 1)
+            delay(gapMs);
     }
 }
 
 void updateStatusLed()
 {
     static unsigned long lastToggle = 0;
-    static bool          ledState   = false;
-    unsigned long        interval   = nodeIdAssigned ? 2000UL : 300UL;
-    unsigned long        now        = millis();
-    if (now - lastToggle >= interval) {
+    static bool ledState = false;
+    unsigned long interval = nodeIdAssigned ? 2000UL : 300UL;
+    unsigned long now = millis();
+    if (now - lastToggle >= interval)
+    {
         lastToggle = now;
-        ledState   = !ledState;
+        ledState = !ledState;
         digitalWrite(LED_PIN, ledState ? HIGH : LOW);
     }
 }
@@ -137,18 +141,19 @@ inline float rawToGrams(int32_t raw)
 // ====== IQR-filtered median over rolling buffer ======
 float iqrMedian()
 {
-    if (bufCount < 3) return NAN;
+    if (bufCount < 3)
+        return NAN;
 
     int32_t tmp[ROLLING_BUF_SIZE];
     memcpy(tmp, rawBuf, sizeof(int32_t) * bufCount);
     int n = bufCount;
     std::sort(tmp, tmp + n);
 
-    float q1  = (float)tmp[n / 4];
-    float q3  = (float)tmp[(3 * n) / 4];
+    float q1 = (float)tmp[n / 4];
+    float q3 = (float)tmp[(3 * n) / 4];
     float iqr = q3 - q1;
-    float lo  = q1 - 1.5f * iqr;
-    float hi  = q3 + 1.5f * iqr;
+    float lo = q1 - 1.5f * iqr;
+    float hi = q3 + 1.5f * iqr;
 
     int32_t inliers[ROLLING_BUF_SIZE];
     int ic = 0;
@@ -162,11 +167,13 @@ float iqrMedian()
 // ====== Load cell ======
 void sampleLoadCell()
 {
-    if (!scale.is_ready()) return;
+    if (!scale.is_ready())
+        return;
     int32_t raw = scale.read();
     rawBuf[bufIndex] = raw;
     bufIndex = (bufIndex + 1) % ROLLING_BUF_SIZE;
-    if (bufCount < ROLLING_BUF_SIZE) bufCount++;
+    if (bufCount < ROLLING_BUF_SIZE)
+        bufCount++;
 }
 
 // ====== Send helpers ======
@@ -192,7 +199,7 @@ void requestNodeId()
     strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
     sendPacket(pkt);
     lastIdReqMs = millis();
-    ledFlash(1, 150, 0);   // 1 medium flash — ID request sent
+    ledFlash(1, 150, 0); // 1 medium flash — ID request sent
     Serial.println("📤 REQ_NODE_ID (200)");
 }
 
@@ -200,31 +207,33 @@ static void confirmNodeId()
 {
     sensor_data_t pkt = {};
     pkt.request_code = RES_NODE_CONFIRM;
-    strncpy(pkt.node_id,  nodeId,  sizeof(pkt.node_id)  - 1);
+    strncpy(pkt.node_id, nodeId, sizeof(pkt.node_id) - 1);
     strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
     sendPacket(pkt);
-    ledFlash(3, 80, 80);   // 3 fast flashes — ID confirmed
+    ledFlash(3, 80, 80); // 3 fast flashes — ID confirmed
     Serial.printf("📤 RES_NODE_CONFIRM (202) id=%s\n", nodeId);
 }
 
 void sendSensorData()
 {
     float weight = iqrMedian();
-    if (isnan(weight)) return;
-    if (fabsf(weight - lastTxWeight) <= TRANSMIT_DELTA_G) return;
+    if (isnan(weight))
+        return;
+    if (fabsf(weight - lastTxWeight) <= TRANSMIT_DELTA_G)
+        return;
 
     sensor_data_t pkt = {};
     pkt.request_code = REQ_SENSOR_DATA;
-    strncpy(pkt.node_id,  nodeId,  sizeof(pkt.node_id)  - 1);
+    strncpy(pkt.node_id, nodeId, sizeof(pkt.node_id) - 1);
     strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
-    pkt.reading   = weight;
+    pkt.reading = weight;
     pkt.timestamp = (uint32_t)(millis() / 1000UL);
     pkt.via = 0;
 
     sendPacket(pkt);
     lastTxWeight = weight;
-    lastSendMs   = millis();
-    ledFlash(1, 50, 0);    // 1 short flash — sensor data sent
+    lastSendMs = millis();
+    ledFlash(1, 50, 0); // 1 short flash — sensor data sent
     Serial.printf("📤 REQ_SENSOR_DATA (203) %.2f g\n", weight);
 }
 
@@ -238,13 +247,13 @@ static void saveNodeId(const char *id)
 
 static void eraseNode()
 {
-    ledFlash(5, 60, 60);   // 5 rapid flashes — erasing NVS
+    ledFlash(5, 60, 60); // 5 rapid flashes — erasing NVS
     prefs.begin("node_cfg", false);
     prefs.clear();
     prefs.end();
     memset(nodeId, 0, sizeof(nodeId));
     nodeIdAssigned = false;
-    lastTxWeight   = -9999.0f;
+    lastTxWeight = -9999.0f;
     Serial.println("🗑️ NVS cleared");
 }
 
@@ -252,7 +261,7 @@ static void sendDisconnect()
 {
     sensor_data_t pkt = {};
     pkt.request_code = REQ_DISCONNECT;
-    strncpy(pkt.node_id,  nodeId,  sizeof(pkt.node_id)  - 1);
+    strncpy(pkt.node_id, nodeId, sizeof(pkt.node_id) - 1);
     strncpy(pkt.node_mac, nodeMac, sizeof(pkt.node_mac) - 1);
     sendPacket(pkt);
     eraseNode();           // erase NVS immediately — stops sensor data, prevents double-send
@@ -277,7 +286,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len)
         strncpy(nodeId, pkt.node_id, sizeof(nodeId) - 1);
         nodeIdAssigned = true;
         saveNodeId(nodeId);
-        ledFlash(3, 80, 80);   // 3 fast flashes — ID received from master
+        ledFlash(3, 80, 80); // 3 fast flashes — ID received from master
         Serial.printf("✅ Node-ID assigned: %s\n", nodeId);
         confirmNodeId();
         break;
@@ -303,7 +312,8 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len)
 void onDataSent(const uint8_t *mac, esp_now_send_status_t st)
 {
     bool toRepeater = (memcmp(mac, repeaterMAC, 6) == 0);
-    if (st == ESP_NOW_SEND_SUCCESS) {
+    if (st == ESP_NOW_SEND_SUCCESS)
+    {
         Serial.printf("📡 Send OK — delivered %s\n", toRepeater ? "via repeater" : "direct");
         return;
     }
@@ -315,12 +325,15 @@ void onDataSent(const uint8_t *mac, esp_now_send_status_t st)
     // The repeater relays to master (stamping via=1), so the master learns the
     // route and future downlinks (201/205) come back through the repeater.
     // mac == repeaterMAC here means the fallback itself failed — give up.
-    if (!triedRepeater && memcmp(mac, masterMAC, 6) == 0) {
+    if (!triedRepeater && memcmp(mac, masterMAC, 6) == 0)
+    {
         triedRepeater = true;
         Serial.println("↪️ Direct send failed — retrying via repeater");
         esp_err_t r = esp_now_send(repeaterMAC, (const uint8_t *)&lastPkt, sizeof(lastPkt));
         Serial.printf("   repeater send queued: %s (err=%d)\n", r == ESP_OK ? "OK" : "FAIL", r);
-    } else if (triedRepeater) {
+    }
+    else if (triedRepeater)
+    {
         Serial.println("❌ Repeater fallback also failed — packet dropped");
     }
 }
@@ -337,24 +350,35 @@ void handleButton()
 
     bool pressed = (digitalRead(BUTTON_PIN) == LOW);
 
-    if (pressed && !wasPressed) {
-        pressedAt  = millis();
+    if (pressed && !wasPressed)
+    {
+        pressedAt = millis();
         wasPressed = true;
         Serial.println("🔘 Button pressed");
-    } else if (!pressed && wasPressed) {
+    }
+    else if (!pressed && wasPressed)
+    {
         unsigned long held = millis() - pressedAt;
         wasPressed = false;
-        if (held >= ERASE_PRESS_MS) {
+        if (held >= ERASE_PRESS_MS)
+        {
             Serial.println("🗑️ Ultra press — erasing NVS flash");
             eraseNode();
-        } else if (held >= LONG_PRESS_MS) {
-            if (nodeIdAssigned) {
+        }
+        else if (held >= LONG_PRESS_MS)
+        {
+            if (nodeIdAssigned)
+            {
                 Serial.println("📤 Long press — sending disconnect");
                 sendDisconnect();
-            } else {
+            }
+            else
+            {
                 Serial.println("⚠️ Long press — no node ID yet, ignored");
             }
-        } else {
+        }
+        else
+        {
             Serial.println("🔘 Short press — ignored");
         }
     }
@@ -367,14 +391,15 @@ void setup()
     delay(1000);
     Serial.println("\n=== FluidCare Node ===");
 
-    pinMode(LED_PIN,    OUTPUT);
+    pinMode(LED_PIN, OUTPUT);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     digitalWrite(LED_PIN, LOW);
 
     prefs.begin("node_cfg", false);
     String saved = prefs.getString("node_id", "");
     prefs.end();
-    if (saved.length() > 0) {
+    if (saved.length() > 0)
+    {
         strncpy(nodeId, saved.c_str(), sizeof(nodeId) - 1);
         nodeIdAssigned = true;
         Serial.printf("💾 Restored Node-ID: %s\n", nodeId);
@@ -385,7 +410,8 @@ void setup()
     WiFi.setSleep(false);
 
     esp_err_t chErr = esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    uint8_t actualCh; wifi_second_chan_t sch2;
+    uint8_t actualCh;
+    wifi_second_chan_t sch2;
     esp_wifi_get_channel(&actualCh, &sch2);
     Serial.printf("📡 Channel set=%d err=%d actual=%d\n", WIFI_CHANNEL, chErr, actualCh);
 
@@ -400,7 +426,8 @@ void setup()
 
     esp_err_t nowErr = esp_now_init();
     Serial.printf("📶 ESP-NOW init: %s (err=%d)\n", nowErr == ESP_OK ? "OK" : "FAIL", nowErr);
-    if (nowErr != ESP_OK) ESP.restart();
+    if (nowErr != ESP_OK)
+        ESP.restart();
     esp_now_register_recv_cb(onDataRecv);
     esp_now_register_send_cb(onDataSent);
 
