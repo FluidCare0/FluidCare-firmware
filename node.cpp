@@ -23,8 +23,8 @@
 #define DISCONNECT_BTN_PIN 13   // dedicated button — press = send disconnect (207)
 #define LED_PIN            2
 
-// ====== WiFi channel (must match master) ======
-#define WIFI_CHANNEL 3
+// ====== WiFi channel (must match master's hotspot channel) ======
+#define WIFI_CHANNEL 6
 
 // ====== Calibration (7-point least-squares, see reading.csv) ======
 #define CALIB_M 0.00119454f

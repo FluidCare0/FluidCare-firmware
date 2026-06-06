@@ -26,7 +26,7 @@
 
 // ====== Config — update masterMAC to match master board ======
 uint8_t masterMAC[] = {0x6C, 0xC8, 0x40, 0x35, 0x58, 0xC8};
-#define WIFI_CHANNEL 3
+#define WIFI_CHANNEL 6
 #define LED_PIN      2
 
 // ====== Shared packet (must match master.cpp and node.cpp) ======
