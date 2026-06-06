@@ -194,6 +194,78 @@ sequenceDiagram
 
 ---
 
+# 🔍 How to Get a Device's MAC Address
+
+Every board prints its own MAC on the Serial Monitor at boot. Routing
+(`masterMAC`, `repeaterMAC` in [node.cpp](node.cpp)) depends on these
+values, so read them before flashing nodes.
+
+### Steps
+
+1. Flash the sketch to the board (`node.cpp` / `repeater.cpp` / master sketch).
+2. Open the **Serial Monitor** in Arduino IDE (`Tools → Serial Monitor`).
+3. Set baud rate to **115200**.
+4. Press the board's **RESET** button.
+5. Read the MAC printed at boot, e.g.:
+
+   ```
+   📟 Node MAC: A1:B2:C3:D4:E5:F6
+   ```
+
+### Standalone Sketch (Print MAC Only)
+
+Flash this minimal sketch to any ESP32 board to read its STA MAC — no
+firmware logic, just the address.
+
+```cpp
+#include <WiFi.h>
+#include <esp_wifi.h>
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  WiFi.mode(WIFI_STA);          // ESP-NOW uses the STA interface
+
+  uint8_t mac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, mac);
+
+  Serial.printf("Device MAC (STA): %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+void loop() {
+  // nothing — MAC already printed at boot
+}
+```
+
+Copy the printed value into `masterMAC[]` / `repeaterMAC[]` in
+[node.cpp](node.cpp) as a byte array:
+
+```cpp
+// Serial: 6C:C8:40:35:58:C8
+uint8_t masterMAC[] = {0x6C, 0xC8, 0x40, 0x35, 0x58, 0xC8};
+```
+
+---
+
+### Order of Operations
+
+* **Master** — flash first, note its MAC. Put it in `masterMAC[]` in [node.cpp](node.cpp).
+* **Repeater** — flash next, note its MAC. Put it in `repeaterMAC[]` for nodes behind it.
+* **Node** — direct-to-master nodes target `masterMAC`; nodes behind a repeater target `repeaterMAC`.
+
+### MAC Format
+
+* 6 bytes, hex: `A1:B2:C3:D4:E5:F6`
+* In code as byte array: `{0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6}`
+* Uses the **STA (station) interface** MAC (`esp_wifi_get_mac(WIFI_IF_STA, ...)`)
+
+> ⚠️ ESP boards have separate STA and AP MACs. ESP-NOW routing uses the **STA**
+> MAC — always copy the one printed by the firmware, not the one on the chip label.
+
+---
+
 # 🚀 Final Summary
 
 * **203** → Initiates reset (Node → Backend)

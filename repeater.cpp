@@ -177,9 +177,13 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     }
 }
 
-void onDataSent(const uint8_t *, esp_now_send_status_t st)
+void onDataSent(const uint8_t *mac, esp_now_send_status_t st)
 {
-    Serial.printf("📡 Send callback: %s\n", st == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
+    bool toMaster = macEqual(mac, masterMAC);
+    Serial.printf("📡 Delivery %s → %s (%02X:%02X:%02X:%02X:%02X:%02X)\n",
+                  st == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL",
+                  toMaster ? "master" : "node",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 // ====== setup ======

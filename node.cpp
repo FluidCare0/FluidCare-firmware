@@ -69,6 +69,11 @@ typedef struct sensor_data {
 // (Flash repeater.cpp first — repeater prints its own MAC on Serial at boot.)
 uint8_t masterMAC[] = {0x6C, 0xC8, 0x40, 0x35, 0x58, 0xC8};
 
+// Repeater fallback: if a direct send to master reports FAIL (out of range),
+// the same packet is resent once to this repeater, which relays it to master.
+// Replace with your repeater's MAC (printed on Serial at repeater boot).
+uint8_t repeaterMAC[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
 // ====== State ======
 Preferences prefs;
 HX711       scale;
@@ -84,6 +89,12 @@ int     bufCount = 0;
 float         lastTxWeight = -9999.0f;
 unsigned long lastSendMs   = 0;
 unsigned long lastIdReqMs  = 0;
+
+// ====== Repeater failover state ======
+// Holds the last packet sent direct to master, so onDataSent can resend it via
+// the repeater if delivery fails. triedRepeater stops a second fallback hop.
+sensor_data_t lastPkt;
+bool          triedRepeater = false;
 
 // ====== LED ======
 // Pattern legend:
@@ -161,6 +172,11 @@ void sampleLoadCell()
 // ====== Send helpers ======
 static void sendPacket(sensor_data_t &pkt)
 {
+    // Remember this packet + arm failover; node_mac must be set so the repeater
+    // and master can identify the origin node when relayed (via=1).
+    memcpy(&lastPkt, &pkt, sizeof(lastPkt));
+    triedRepeater = false;
+
     Serial.printf("📡 espnow_send code=%d size=%d to=%02X:%02X:%02X:%02X:%02X:%02X\n",
                   pkt.request_code, sizeof(pkt),
                   masterMAC[0], masterMAC[1], masterMAC[2],
@@ -284,11 +300,29 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len)
     }
 }
 
-void onDataSent(const uint8_t *, esp_now_send_status_t st)
+void onDataSent(const uint8_t *mac, esp_now_send_status_t st)
 {
-    if (st != ESP_NOW_SEND_SUCCESS)
-        ledFlash(2, 50, 50); // 2 quick flashes — send failed
-    Serial.printf("📡 Send %s\n", st == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
+    bool toRepeater = (memcmp(mac, repeaterMAC, 6) == 0);
+    if (st == ESP_NOW_SEND_SUCCESS) {
+        Serial.printf("📡 Send OK — delivered %s\n", toRepeater ? "via repeater" : "direct");
+        return;
+    }
+    Serial.printf("📡 Send FAIL (%s)\n", toRepeater ? "repeater" : "direct");
+
+    ledFlash(2, 50, 50); // 2 quick flashes — send failed
+
+    // Failover: direct-to-master delivery failed → resend once via repeater.
+    // The repeater relays to master (stamping via=1), so the master learns the
+    // route and future downlinks (201/205) come back through the repeater.
+    // mac == repeaterMAC here means the fallback itself failed — give up.
+    if (!triedRepeater && memcmp(mac, masterMAC, 6) == 0) {
+        triedRepeater = true;
+        Serial.println("↪️ Direct send failed — retrying via repeater");
+        esp_err_t r = esp_now_send(repeaterMAC, (const uint8_t *)&lastPkt, sizeof(lastPkt));
+        Serial.printf("   repeater send queued: %s (err=%d)\n", r == ESP_OK ? "OK" : "FAIL", r);
+    } else if (triedRepeater) {
+        Serial.println("❌ Repeater fallback also failed — packet dropped");
+    }
 }
 
 // ====== Button (BOOT GPIO0) ======
@@ -375,7 +409,14 @@ void setup()
     peer.channel = WIFI_CHANNEL;
     peer.encrypt = false;
     esp_err_t peerErr = esp_now_add_peer(&peer);
-    Serial.printf("👥 Add peer: %s (err=%d)\n", peerErr == ESP_OK ? "OK" : "FAIL", peerErr);
+    Serial.printf("👥 Add master peer: %s (err=%d)\n", peerErr == ESP_OK ? "OK" : "FAIL", peerErr);
+
+    esp_now_peer_info_t repPeer = {};
+    memcpy(repPeer.peer_addr, repeaterMAC, 6);
+    repPeer.channel = WIFI_CHANNEL;
+    repPeer.encrypt = false;
+    esp_err_t repErr = esp_now_add_peer(&repPeer);
+    Serial.printf("👥 Add repeater peer: %s (err=%d)\n", repErr == ESP_OK ? "OK" : "FAIL", repErr);
 
     scale.begin(HX711_DOUT_PIN, HX711_SCK_PIN);
     Serial.println("✅ HX711 initialized");
