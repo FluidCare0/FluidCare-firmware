@@ -567,9 +567,15 @@ void setup()
     // LCD init — scan I2C, show splash before WiFi connect
     Wire.begin(21, 22);
     Wire.setClock(100000);  // 100 kHz — cheap PCF8574 modules unreliable at 400 kHz
+    delay(100);             // let I2C bus settle after restart before talking to LCD
     uint8_t lcdAddr = scanI2C();
     lcd = new LiquidCrystal_I2C(lcdAddr, 16, 2);
     lcd->init();
+    lcd->clear();           // flush any stale state left from before restart
+    delay(50);
+    lcd->init();            // second init ensures PCF8574 accepts commands after cold/warm restart
+    lcd->clear();
+    delay(100);
     lcd->backlight();
     delay(200);
     showSplash();
