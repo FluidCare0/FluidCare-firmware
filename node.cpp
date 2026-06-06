@@ -63,7 +63,10 @@ typedef struct sensor_data {
     char     master_mac[18];
 } sensor_data_t;
 
-// ====== Master MAC — update if master board changes ======
+// ====== Target MAC ======
+// Direct-to-master node: use master board MAC.
+// Node behind a repeater: replace these bytes with the repeater's MAC.
+// (Flash repeater.cpp first — repeater prints its own MAC on Serial at boot.)
 uint8_t masterMAC[] = {0x6C, 0xC8, 0x40, 0x35, 0x58, 0xC8};
 
 // ====== State ======

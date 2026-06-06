@@ -13,6 +13,7 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <WiFi.h>
+
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
@@ -20,37 +21,37 @@
 #include <esp_wifi.h>
 
 // ====== WiFi ======
-const char *WIFI_SSID     = "Airtel_sahi_2825";
-const char *WIFI_PASSWORD = "Air@68881";
+const char *WIFI_SSID = "Ak_Galaxy_A51";
+const char *WIFI_PASSWORD = "12345678";
 
 // ====== HiveMQ (TLS port 8883) ======
-const char    *MQTT_BROKER_HOST = "1e578bacd37e4198a99e7a4a28756c6e.s1.eu.hivemq.cloud";
-const uint16_t MQTT_PORT        = 8883;
-const char    *MQTT_CLIENT_ID   = "esp32-master-2026";
-const char    *MQTT_USER        = "kanbs";
-const char    *MQTT_PASS        = "Kartik@3165";
+const char *MQTT_BROKER_HOST = "1e578bacd37e4198a99e7a4a28756c6e.s1.eu.hivemq.cloud";
+const uint16_t MQTT_PORT = 8883;
+const char *MQTT_CLIENT_ID = "esp32-master-2026";
+const char *MQTT_USER = "kanbs";
+const char *MQTT_PASS = "Kartik@3165";
 
-#define LED_PIN    2
-#define BUTTON_PIN 0   // BOOT button, active LOW
+#define LED_PIN 2
+#define BUTTON_PIN 0 // BOOT button, active LOW
 
 // ====== Protocol codes ======
-#define REQ_NODE_ID       200
-#define RES_NODE_ASSIGN   201
-#define RES_NODE_CONFIRM  202
-#define REQ_SENSOR_DATA   203
+#define REQ_NODE_ID 200
+#define RES_NODE_ASSIGN 201
+#define RES_NODE_CONFIRM 202
+#define REQ_SENSOR_DATA 203
 #define REQ_TASK_COMPLETE 204
-#define RES_ERASE_FLASH   205
+#define RES_ERASE_FLASH 205
 #define RES_ERASE_CONFIRM 206
-#define REQ_DISCONNECT    207
+#define REQ_DISCONNECT 207
 
 // ====== MQTT topics ======
-#define TOPIC_MASTER_IN          "be_project/master/in"
-#define TOPIC_NODE_REGISTER      "be_project/node/register"
-#define TOPIC_NODE_CONFIRM_ID    "be_project/node/confirm_id"
-#define TOPIC_NODE_DATA          "be_project/node/data"
+#define TOPIC_MASTER_IN "be_project/master/in"
+#define TOPIC_NODE_REGISTER "be_project/node/register"
+#define TOPIC_NODE_CONFIRM_ID "be_project/node/confirm_id"
+#define TOPIC_NODE_DATA "be_project/node/data"
 #define TOPIC_NODE_TASK_COMPLETE "be_project/node/task_complete"
 #define TOPIC_NODE_ERASE_CONFIRM "be_project/node/erase_confirm"
-#define TOPIC_NODE_DISCONNECT    "be_project/disconnect"
+#define TOPIC_NODE_DISCONNECT "be_project/disconnect"
 
 // ====== ISRG Root X1 CA cert (HiveMQ TLS) ======
 static const char ISRG_ROOT_X1[] PROGMEM = R"EOF(
@@ -88,37 +89,38 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 )EOF";
 
 WiFiClientSecure espClientSecure;
-PubSubClient     mqttClient(espClientSecure);
+PubSubClient mqttClient(espClientSecure);
 
 // ====== LCD ======
 LiquidCrystal_I2C *lcd = nullptr;
 
 // Display data — written only from loop(), never from ESP-NOW callback
-static float         dispReading  = 0.0f;
-static unsigned long dispDataMs   = 0;
-static char          dispNodeId[13] = "";   // last 12 chars of node_id
+static float dispReading = 0.0f;
+static unsigned long dispDataMs = 0;
+static char dispNodeId[13] = ""; // last 12 chars of node_id
 
 // Display page state
-static int           displayPage        = 0;
-static bool          displayNeedsRedraw = true;
-static unsigned long lastPageChange     = 0;   // reset on button press or auto-advance
+static int displayPage = 0;
+static bool displayNeedsRedraw = true;
+static unsigned long lastPageChange = 0; // reset on button press or auto-advance
 
 // Last event — written from onDataRecv (WiFi task), read in loop (main task)
-static char          lastEvent[17]  = "No events yet   ";
-static unsigned long lastEventMs    = 0;
+static char lastEvent[17] = "No events yet   ";
+static unsigned long lastEventMs = 0;
 
 // ====== Shared packet (must match node) ======
-typedef struct sensor_data {
+typedef struct sensor_data
+{
     uint16_t request_code;
-    char     node_id[37];
-    char     node_mac[18];
-    float    reading;
+    char node_id[37];
+    char node_mac[18];
+    float reading;
     uint32_t timestamp;
-    char     date_str[11];
-    char     time_str[9];
-    uint8_t  via;
-    char     repeater_mac[18];
-    char     master_mac[18];
+    char date_str[11];
+    char time_str[9];
+    uint8_t via;
+    char repeater_mac[18];
+    char master_mac[18];
 } sensor_data_t;
 
 // ====== FreeRTOS queue for sensor data (ISR → loop) ======
@@ -128,7 +130,68 @@ QueueHandle_t mqttQueue;
 // ====== Peer tracking ======
 #define MAX_NODES 10
 uint8_t registeredNodes[MAX_NODES][6];
-int     nodeCount = 0;
+int nodeCount = 0;
+
+// ====== Repeater routing map ======
+// Built dynamically: when master receives a packet with via=1, it stores the
+// node_mac → repeater_mac mapping so downlinks (201, 205) route correctly.
+#define MAX_ROUTED_NODES 10
+struct NodeRoute
+{
+    char node_mac[18];
+    uint8_t repeater_mac[6];
+};
+NodeRoute nodeRoutes[MAX_ROUTED_NODES];
+int routeCount = 0;
+int repeaterCount = 0; // unique repeaters seen (for LCD)
+
+static void storeRoute(const char *nodeMacStr, const uint8_t *repMac)
+{
+    for (int i = 0; i < routeCount; i++)
+        if (strcmp(nodeRoutes[i].node_mac, nodeMacStr) == 0)
+            return;
+
+    if (routeCount >= MAX_ROUTED_NODES)
+        return;
+
+    strncpy(nodeRoutes[routeCount].node_mac, nodeMacStr, 17);
+    nodeRoutes[routeCount].node_mac[17] = '\0';
+    memcpy(nodeRoutes[routeCount].repeater_mac, repMac, 6);
+    routeCount++;
+
+    // Count unique repeater MACs
+    int unique = 0;
+    for (int i = 0; i < routeCount; i++)
+    {
+        bool found = false;
+        for (int j = 0; j < i; j++)
+            if (memcmp(nodeRoutes[i].repeater_mac, nodeRoutes[j].repeater_mac, 6) == 0)
+            {
+                found = true;
+                break;
+            }
+        if (!found)
+            unique++;
+    }
+    repeaterCount = unique;
+
+    Serial.printf("📌 Route stored: node=%s via repeater %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  nodeMacStr,
+                  repMac[0], repMac[1], repMac[2], repMac[3], repMac[4], repMac[5]);
+}
+
+static bool findRepeaterForNode(const char *nodeMacStr, uint8_t *outRepMac)
+{
+    for (int i = 0; i < routeCount; i++)
+    {
+        if (strcmp(nodeRoutes[i].node_mac, nodeMacStr) == 0)
+        {
+            memcpy(outRepMac, nodeRoutes[i].repeater_mac, 6);
+            return true;
+        }
+    }
+    return false;
+}
 
 // ====== LED helpers ======
 // Pattern legend (master — LED solid ON when MQTT connected):
@@ -143,34 +206,39 @@ void ledBlink(unsigned long intervalMs)
     static unsigned long lastToggle = 0;
     static bool state = false;
     unsigned long now = millis();
-    if (now - lastToggle >= intervalMs) {
+    if (now - lastToggle >= intervalMs)
+    {
         lastToggle = now;
         state = !state;
         digitalWrite(LED_PIN, state ? HIGH : LOW);
     }
 }
-void ledOn()  { digitalWrite(LED_PIN, HIGH); }
-void ledOff() { digitalWrite(LED_PIN, LOW);  }
+void ledOn() { digitalWrite(LED_PIN, HIGH); }
+void ledOff() { digitalWrite(LED_PIN, LOW); }
 
 // Brief OFF dips — activity indicator while MQTT LED stays solid
 void ledDip(int count, int dipMs)
 {
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count; i++)
+    {
         digitalWrite(LED_PIN, LOW);
         delay(dipMs);
         digitalWrite(LED_PIN, HIGH);
-        if (i < count - 1) delay(dipMs);
+        if (i < count - 1)
+            delay(dipMs);
     }
 }
 
 // Solid flashes — for errors when LED may be off
 void ledFlash(int count, int onMs, int gapMs)
 {
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count; i++)
+    {
         digitalWrite(LED_PIN, HIGH);
         delay(onMs);
         digitalWrite(LED_PIN, LOW);
-        if (i < count - 1) delay(gapMs);
+        if (i < count - 1)
+            delay(gapMs);
     }
 }
 
@@ -178,9 +246,11 @@ void ledFlash(int count, int onMs, int gapMs)
 static uint8_t scanI2C()
 {
     const uint8_t candidates[] = {0x27, 0x3F};
-    for (uint8_t addr : candidates) {
+    for (uint8_t addr : candidates)
+    {
         Wire.beginTransmission(addr);
-        if (Wire.endTransmission() == 0) {
+        if (Wire.endTransmission() == 0)
+        {
             Serial.printf("✅ LCD found at 0x%02X\n", addr);
             return addr;
         }
@@ -192,18 +262,23 @@ static uint8_t scanI2C()
 // ====== Boot splash ======
 static void showSplash()
 {
-    if (!lcd) return;
+    if (!lcd)
+        return;
 
     // Screen 1 — project name (2 s)
     lcd->clear();
-    lcd->setCursor(1, 0); lcd->print("Fluid Monitor");
-    lcd->setCursor(3, 1); lcd->print("using IoT");
+    lcd->setCursor(1, 0);
+    lcd->print("Fluid Monitor");
+    lcd->setCursor(3, 1);
+    lcd->print("using IoT");
     delay(2000);
 
     // Screen 2 — team members (2 s)
     lcd->clear();
-    lcd->setCursor(0, 0); lcd->print("Kartik   Sahil  ");
-    lcd->setCursor(0, 1); lcd->print("Aniket  Atharva ");
+    lcd->setCursor(0, 0);
+    lcd->print("Kartik   Sahil  ");
+    lcd->setCursor(0, 1);
+    lcd->print("Aniket  Atharva ");
     delay(2000);
 
     lcd->clear();
@@ -213,19 +288,25 @@ static void showSplash()
 // Press advances to next page (0→1→2→3→0)
 static void handleButton()
 {
-    static bool          prevState   = HIGH;
-    static bool          stableState = HIGH;
-    static unsigned long debounceMs  = 0;
+    static bool prevState = HIGH;
+    static bool stableState = HIGH;
+    static unsigned long debounceMs = 0;
 
     bool raw = digitalRead(BUTTON_PIN);
-    if (raw != prevState) { debounceMs = millis(); prevState = raw; }
+    if (raw != prevState)
+    {
+        debounceMs = millis();
+        prevState = raw;
+    }
 
-    if ((millis() - debounceMs) > 50 && raw != stableState) {
+    if ((millis() - debounceMs) > 50 && raw != stableState)
+    {
         stableState = raw;
-        if (stableState == LOW) {          // falling edge = pressed
-            displayPage        = (displayPage + 1) % 4;
+        if (stableState == LOW)
+        { // falling edge = pressed
+            displayPage = (displayPage + 1) % 4;
             displayNeedsRedraw = true;
-            lastPageChange     = millis();  // reset auto-rotation timer
+            lastPageChange = millis(); // reset auto-rotation timer
             Serial.printf("Button → page %d\n", displayPage);
         }
     }
@@ -238,16 +319,18 @@ static void handleButton()
 // Page 3: team splash
 static void updateDisplay()
 {
-    if (!lcd) return;
+    if (!lcd)
+        return;
 
     static unsigned long lastDrawnEventMs = 0;
-    static unsigned long lastMarqueeMs    = 0;
-    bool                 marqueeTick      = false;
+    static unsigned long lastMarqueeMs = 0;
+    bool marqueeTick = false;
 
     // Auto-rotate every 7 s (button press resets this timer)
-    if (millis() - lastPageChange >= 7000UL) {
-        lastPageChange     = millis();
-        displayPage        = (displayPage + 1) % 4;
+    if (millis() - lastPageChange >= 7000UL)
+    {
+        lastPageChange = millis();
+        displayPage = (displayPage + 1) % 4;
         displayNeedsRedraw = true;
     }
 
@@ -256,56 +339,74 @@ static void updateDisplay()
         displayNeedsRedraw = true;
 
     // Marquee tick every 300 ms while on page 2
-    if (displayPage == 2 && millis() - lastMarqueeMs >= 300UL) {
-        lastMarqueeMs      = millis();
-        marqueeTick        = true;
+    if (displayPage == 2 && millis() - lastMarqueeMs >= 300UL)
+    {
+        lastMarqueeMs = millis();
+        marqueeTick = true;
         displayNeedsRedraw = true;
     }
 
-    if (!displayNeedsRedraw) return;
+    if (!displayNeedsRedraw)
+        return;
     displayNeedsRedraw = false;
-    if (displayPage == 1) lastDrawnEventMs = lastEventMs;
+    if (displayPage == 1)
+        lastDrawnEventMs = lastEventMs;
 
     // Clear only on page switch — marquee ticks overwrite in-place (no flicker)
-    if (!marqueeTick) lcd->clear();
+    if (!marqueeTick)
+        lcd->clear();
 
     char r0[17], r1[17];
 
-    switch (displayPage) {
+    switch (displayPage)
+    {
     case 0:
         snprintf(r0, 17, "Nodes:%10d", nodeCount);
-        snprintf(r1, 17, "Repeaters:%6d", 0);   // repeater count — update when implemented
-        lcd->setCursor(0, 0); lcd->print(r0);
-        lcd->setCursor(0, 1); lcd->print(r1);
+        snprintf(r1, 17, "Repeaters:%6d", repeaterCount);
+        lcd->setCursor(0, 0);
+        lcd->print(r0);
+        lcd->setCursor(0, 1);
+        lcd->print(r1);
         break;
 
     case 1:
-        lcd->setCursor(0, 0); lcd->print("Last Event:     ");
-        lcd->setCursor(0, 1); lcd->print(lastEvent);
+        lcd->setCursor(0, 0);
+        lcd->print("Last Event:     ");
+        lcd->setCursor(0, 1);
+        lcd->print(lastEvent);
         break;
 
-    case 2: {
-        static int  marqueeOff = 0;
-        const char *title      = "Automated Fluid Monitoring System using IoT";
-        int         tlen       = strlen(title);
-        int         span       = tlen + 5;  // 5-space gap before repeat
+    case 2:
+    {
+        static int marqueeOff = 0;
+        const char *title = "Automated Fluid Monitoring System using IoT";
+        int tlen = strlen(title);
+        int span = tlen + 5; // 5-space gap before repeat
 
         char row1[17];
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < 16; i++)
+        {
             int idx = (marqueeOff + i) % span;
             row1[i] = (idx < tlen) ? title[idx] : ' ';
         }
         row1[16] = '\0';
         marqueeOff = (marqueeOff + 1) % span;
 
-        if (!marqueeTick) { lcd->setCursor(0, 0); lcd->print("BE Project      "); }
-        lcd->setCursor(0, 1); lcd->print(row1);
+        if (!marqueeTick)
+        {
+            lcd->setCursor(0, 0);
+            lcd->print("BE Project      ");
+        }
+        lcd->setCursor(0, 1);
+        lcd->print(row1);
         break;
     }
 
     case 3:
-        lcd->setCursor(0, 0); lcd->print("Kartik   Sahil  ");
-        lcd->setCursor(0, 1); lcd->print("Aniket  Atharva ");
+        lcd->setCursor(0, 0);
+        lcd->print("Kartik   Sahil  ");
+        lcd->setCursor(0, 1);
+        lcd->print("Aniket  Atharva ");
         break;
     }
 }
@@ -314,16 +415,19 @@ static void updateDisplay()
 bool addPeerIfNeeded(const uint8_t *mac)
 {
     for (int i = 0; i < nodeCount; i++)
-        if (memcmp(registeredNodes[i], mac, 6) == 0) return true;
+        if (memcmp(registeredNodes[i], mac, 6) == 0)
+            return true;
 
-    if (esp_now_is_peer_exist(mac)) return true;
+    if (esp_now_is_peer_exist(mac))
+        return true;
 
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, mac, 6);
     peerInfo.channel = 3;
     peerInfo.encrypt = false;
 
-    if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+    if (esp_now_add_peer(&peerInfo) == ESP_OK)
+    {
         if (nodeCount < MAX_NODES)
             memcpy(registeredNodes[nodeCount++], mac, 6);
         Serial.printf("✅ Added peer: %02X:%02X:%02X:%02X:%02X:%02X\n",
@@ -342,8 +446,10 @@ bool parseMacString(const char *macStr, uint8_t *out)
 
 void espnowSendWithRetry(const uint8_t *mac, const sensor_data_t &pkt)
 {
-    for (int i = 0; i < 3; i++) {
-        if (esp_now_send(mac, (const uint8_t *)&pkt, sizeof(pkt)) == ESP_OK) {
+    for (int i = 0; i < 3; i++)
+    {
+        if (esp_now_send(mac, (const uint8_t *)&pkt, sizeof(pkt)) == ESP_OK)
+        {
             Serial.printf("✅ ESP-NOW sent (attempt %d)\n", i + 1);
             return;
         }
@@ -356,42 +462,58 @@ void espnowSendWithRetry(const uint8_t *mac, const sensor_data_t &pkt)
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
     StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, payload, length)) {
+    if (deserializeJson(doc, payload, length))
+    {
         Serial.println("❌ JSON parse error");
         return;
     }
 
-    uint16_t   reqCode = doc["request_code"];
+    uint16_t reqCode = doc["request_code"];
     const char *macStr = doc["mac"];
 
     Serial.printf("📩 MQTT topic=%s code=%d mac=%s\n",
                   topic, reqCode, macStr ? macStr : "null");
 
-    if (reqCode == RES_NODE_ASSIGN || reqCode == RES_ERASE_FLASH) {
-        if (!macStr) {
+    if (reqCode == RES_NODE_ASSIGN || reqCode == RES_ERASE_FLASH)
+    {
+        if (!macStr)
+        {
             Serial.printf("❌ No MAC in code %d\n", reqCode);
             return;
         }
         uint8_t nodeMac[6];
-        if (!parseMacString(macStr, nodeMac)) {
+        if (!parseMacString(macStr, nodeMac))
+        {
             Serial.printf("❌ Invalid MAC: %s\n", macStr);
             return;
         }
-        if (!addPeerIfNeeded(nodeMac)) return;
 
         sensor_data_t reply = {};
         reply.request_code = reqCode;
-        strncpy(reply.node_mac, "MASTER", sizeof(reply.node_mac) - 1);
+        // Always put the target node MAC so the repeater (if any) knows where to forward
+        strncpy(reply.node_mac, macStr, sizeof(reply.node_mac) - 1);
 
-        if (reqCode == RES_NODE_ASSIGN) {
+        if (reqCode == RES_NODE_ASSIGN)
+        {
             const char *nid = doc["node_id"] | "";
             strncpy(reply.node_id, nid, sizeof(reply.node_id) - 1);
-            Serial.printf("📡 Forward 201 → %s  id=%s\n", macStr, nid);
-        } else {
-            Serial.printf("📡 Forward 205 → %s\n", macStr);
         }
 
-        espnowSendWithRetry(nodeMac, reply);
+        // Route: via repeater if node was seen relayed, else direct
+        uint8_t repMac[6];
+        if (findRepeaterForNode(macStr, repMac))
+        {
+            Serial.printf("📡 Forward code=%d → repeater (for node %s)\n", reqCode, macStr);
+            addPeerIfNeeded(repMac);
+            espnowSendWithRetry(repMac, reply);
+        }
+        else
+        {
+            Serial.printf("📡 Forward code=%d → direct node %s\n", reqCode, macStr);
+            if (!addPeerIfNeeded(nodeMac))
+                return;
+            espnowSendWithRetry(nodeMac, reply);
+        }
     }
 }
 
@@ -402,17 +524,16 @@ void connectWiFi()
     WiFi.disconnect(true);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
-    WiFi.config(IPAddress(192, 168, 1, 55), IPAddress(192, 168, 1, 1),
-                IPAddress(255, 255, 255, 0), IPAddress(1, 1, 1, 1),
-                IPAddress(8, 8, 8, 8));
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     int retry = 0;
-    while (WiFi.status() != WL_CONNECTED) {
+    while (WiFi.status() != WL_CONNECTED)
+    {
         ledBlink(300);
         delay(500);
         Serial.print(".");
-        if (++retry > 40) {
+        if (++retry > 40)
+        {
             Serial.println("\n❌ WiFi failed, restarting...");
             ESP.restart();
         }
@@ -434,12 +555,15 @@ void connectMQTT()
     mqttClient.setCallback(mqttCallback);
 
     Serial.println("🔐 Connecting to HiveMQ...");
-    if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS)) {
+    if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS))
+    {
         Serial.println("✅ MQTT connected");
         ledOn();
         mqttClient.subscribe(TOPIC_MASTER_IN);
         Serial.printf("📬 Subscribed to %s\n", TOPIC_MASTER_IN);
-    } else {
+    }
+    else
+    {
         Serial.printf("❌ MQTT failed rc=%d, restarting...\n", mqttClient.state());
         delay(4000);
         ESP.restart();
@@ -456,45 +580,65 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-    Serial.printf("📥 ESP-NOW recv: len=%d from=%s code=%d\n", len, macStr, data.request_code);
+    Serial.printf("📥 ESP-NOW recv: len=%d from=%s code=%d via=%d\n",
+                  len, macStr, data.request_code, data.via);
+
+    // If packet was relayed by a repeater, record the node→repeater route
+    if (data.via == 1 && strlen(data.repeater_mac) > 0)
+    {
+        uint8_t repMac[6];
+        if (parseMacString(data.repeater_mac, repMac))
+        {
+            addPeerIfNeeded(repMac); // ensure we can send downlinks to repeater
+            storeRoute(data.node_mac, repMac);
+        }
+    }
+
+    // macStr = ESP-NOW sender (repeater MAC when via=1).
+    // effectiveMac = actual node MAC for all MQTT publishes.
+    const char *effectiveMac = (data.via == 1 && strlen(data.node_mac) > 0)
+                               ? data.node_mac : macStr;
 
     switch (data.request_code)
     {
     case REQ_NODE_ID:
     {
         Serial.printf("📨 REQ_NODE_ID (200) from %s\n", macStr);
-        ledDip(2, 50);     // 2 dips — register request received
+        ledDip(2, 50); // 2 dips — register request received
         addPeerIfNeeded(mac);
         StaticJsonDocument<128> doc;
-        doc["mac"]          = macStr;
+        doc["mac"] = effectiveMac;
         doc["request_code"] = REQ_NODE_ID;
         char payload[128];
         serializeJson(doc, payload);
         bool pub = mqttClient.publish(TOPIC_NODE_REGISTER, payload);
-        if (!pub) ledFlash(3, 50, 50); // 3 flashes — publish failed
+        if (!pub)
+            ledFlash(3, 50, 50); // 3 flashes — publish failed
         Serial.printf("📤 MQTT publish %s: %s\n", TOPIC_NODE_REGISTER, pub ? "OK" : "FAIL");
-        strncpy(lastEvent, "New Device Req. ", 17); lastEventMs = millis();
+        strncpy(lastEvent, "New Device Req. ", 17);
+        lastEventMs = millis();
         break;
     }
 
     case RES_NODE_CONFIRM:
     {
         Serial.printf("📨 RES_NODE_CONFIRM (202) from %s id=%s\n", macStr, data.node_id);
-        ledDip(1, 50);     // 1 dip — confirm received
+        ledDip(1, 50); // 1 dip — confirm received
         StaticJsonDocument<256> doc;
-        doc["mac"]          = macStr;
-        doc["node_id"]      = data.node_id;
+        doc["mac"] = effectiveMac;
+        doc["node_id"] = data.node_id;
         doc["request_code"] = RES_NODE_CONFIRM;
         char payload[256];
         serializeJson(doc, payload);
         mqttClient.publish(TOPIC_NODE_CONFIRM_ID, payload);
-        strncpy(lastEvent, "Device Confirmed", 17); lastEventMs = millis();
+        strncpy(lastEvent, "Device Confirmed", 17);
+        lastEventMs = millis();
         break;
     }
 
     case REQ_SENSOR_DATA:
     {
-        ledDip(1, 30);     // 1 quick dip — sensor data received
+        ledDip(1, 30); // 1 quick dip — sensor data received
         if (xQueueSend(mqttQueue, &data, 0) != pdTRUE)
             Serial.println("⚠️ Queue full, dropping packet");
         break;
@@ -503,45 +647,48 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     case REQ_TASK_COMPLETE:
     {
         Serial.printf("📨 REQ_TASK_COMPLETE (204) from %s id=%s\n", macStr, data.node_id);
-        ledDip(2, 50);     // 2 dips — task complete received
+        ledDip(2, 50); // 2 dips — task complete received
         addPeerIfNeeded(mac);
         StaticJsonDocument<256> doc;
-        doc["mac"]          = macStr;
-        doc["node_id"]      = data.node_id;
+        doc["mac"] = effectiveMac;
+        doc["node_id"] = data.node_id;
         doc["request_code"] = REQ_TASK_COMPLETE;
         char payload[256];
         serializeJson(doc, payload);
         mqttClient.publish(TOPIC_NODE_TASK_COMPLETE, payload);
-        strncpy(lastEvent, "Task Complete   ", 17); lastEventMs = millis();
+        strncpy(lastEvent, "Task Complete   ", 17);
+        lastEventMs = millis();
         break;
     }
 
     case RES_ERASE_CONFIRM:
     {
         Serial.printf("📨 RES_ERASE_CONFIRM (206) from %s\n", macStr);
-        ledDip(3, 80);     // 3 dips — erase confirmed
+        ledDip(3, 80); // 3 dips — erase confirmed
         StaticJsonDocument<128> doc;
-        doc["mac"]          = macStr;
+        doc["mac"] = effectiveMac;
         doc["request_code"] = RES_ERASE_CONFIRM;
         char payload[128];
         serializeJson(doc, payload);
         mqttClient.publish(TOPIC_NODE_ERASE_CONFIRM, payload);
-        strncpy(lastEvent, "Device Erased   ", 17); lastEventMs = millis();
+        strncpy(lastEvent, "Device Erased   ", 17);
+        lastEventMs = millis();
         break;
     }
 
     case REQ_DISCONNECT:
     {
         Serial.printf("📨 REQ_DISCONNECT (207) from %s id=%s\n", macStr, data.node_id);
-        ledDip(2, 100);    // 2 slow dips — node going offline
+        ledDip(2, 100); // 2 slow dips — node going offline
         StaticJsonDocument<256> doc;
-        doc["mac"]          = macStr;
-        doc["node_id"]      = data.node_id;
+        doc["mac"] = effectiveMac;
+        doc["node_id"] = data.node_id;
         doc["request_code"] = REQ_DISCONNECT;
         char payload[256];
         serializeJson(doc, payload);
         mqttClient.publish(TOPIC_NODE_DISCONNECT, payload);
-        strncpy(lastEvent, "Device Offline  ", 17); lastEventMs = millis();
+        strncpy(lastEvent, "Device Offline  ", 17);
+        lastEventMs = millis();
         break;
     }
 
@@ -566,14 +713,14 @@ void setup()
 
     // LCD init — scan I2C, show splash before WiFi connect
     Wire.begin(21, 22);
-    Wire.setClock(100000);  // 100 kHz — cheap PCF8574 modules unreliable at 400 kHz
-    delay(100);             // let I2C bus settle after restart before talking to LCD
+    Wire.setClock(100000); // 100 kHz — cheap PCF8574 modules unreliable at 400 kHz
+    delay(100);            // let I2C bus settle after restart before talking to LCD
     uint8_t lcdAddr = scanI2C();
     lcd = new LiquidCrystal_I2C(lcdAddr, 16, 2);
     lcd->init();
-    lcd->clear();           // flush any stale state left from before restart
+    lcd->clear(); // flush any stale state left from before restart
     delay(50);
-    lcd->init();            // second init ensures PCF8574 accepts commands after cold/warm restart
+    lcd->init(); // second init ensures PCF8574 accepts commands after cold/warm restart
     lcd->clear();
     delay(100);
     lcd->backlight();
@@ -581,21 +728,26 @@ void setup()
     showSplash();
 
     lcd->clear();
-    lcd->setCursor(0, 0); lcd->print("Connecting WiFi ");
-    lcd->setCursor(0, 1); lcd->print("Please wait...  ");
+    lcd->setCursor(0, 0);
+    lcd->print("Connecting WiFi ");
+    lcd->setCursor(0, 1);
+    lcd->print("Please wait...  ");
 
     connectWiFi();
 
     lcd->clear();
-    lcd->setCursor(0, 0); lcd->print("Connecting MQTT ");
-    lcd->setCursor(0, 1); lcd->print("Please wait...  ");
+    lcd->setCursor(0, 0);
+    lcd->print("Connecting MQTT ");
+    lcd->setCursor(0, 1);
+    lcd->print("Please wait...  ");
 
     uint8_t selfMac[6];
     esp_wifi_get_mac(WIFI_IF_STA, selfMac);
     Serial.printf("📟 Master MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
                   selfMac[0], selfMac[1], selfMac[2], selfMac[3], selfMac[4], selfMac[5]);
 
-    if (esp_now_init() != ESP_OK) {
+    if (esp_now_init() != ESP_OK)
+    {
         Serial.println("❌ ESP-NOW init failed");
         ESP.restart();
     }
@@ -605,7 +757,8 @@ void setup()
     connectMQTT();
 
     lcd->clear();
-    lcd->setCursor(2, 0); lcd->print("System Ready!");
+    lcd->setCursor(2, 0);
+    lcd->print("System Ready!");
     delay(1000);
     lcd->clear();
 
@@ -615,7 +768,8 @@ void setup()
 // ====== loop ======
 void loop()
 {
-    if (!mqttClient.connected()) {
+    if (!mqttClient.connected())
+    {
         Serial.println("⚠️ MQTT disconnected, reconnecting...");
         connectMQTT();
     }
@@ -624,13 +778,14 @@ void loop()
 
     // Drain queue → publish sensor data to MQTT
     sensor_data_t d;
-    while (xQueueReceive(mqttQueue, &d, 0) == pdTRUE) {
+    while (xQueueReceive(mqttQueue, &d, 0) == pdTRUE)
+    {
         StaticJsonDocument<512> doc;
         doc["request_code"] = REQ_SENSOR_DATA;
-        doc["node_id"]      = d.node_id;
-        doc["node_mac"]     = d.node_mac;
-        doc["reading"]      = d.reading;
-        doc["timestamp"]    = d.timestamp;
+        doc["node_id"] = d.node_id;
+        doc["node_mac"] = d.node_mac;
+        doc["reading"] = d.reading;
+        doc["timestamp"] = d.timestamp;
 
         char payload[512];
         serializeJson(doc, payload);
@@ -642,11 +797,12 @@ void loop()
 
         // Update display vars (safe here — loop task only)
         dispReading = d.reading;
-        dispDataMs  = millis();
+        dispDataMs = millis();
         int nlen = strlen(d.node_id);
         if (nlen > 12)
             strncpy(dispNodeId, d.node_id + nlen - 12, 13);
-        else {
+        else
+        {
             strncpy(dispNodeId, d.node_id, 13);
             dispNodeId[12] = '\0';
         }
